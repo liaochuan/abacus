@@ -16,6 +16,8 @@ interface AButtonType {
   px?: number
   loading?: boolean
   testID?: string
+  accessibilityRole?: 'button'
+  accessibilityLabel?: string
 }
 
 export default function AButton({
@@ -29,6 +31,8 @@ export default function AButton({
   style = null,
   children = null,
   testID = null,
+  accessibilityRole,
+  accessibilityLabel,
 }: AButtonType) {
   const { colors } = useThemeColors();
   const selectedBrandStyle = useSelector((state: RootState) => state.configuration.selectedBrandStyle || colors.brandStyleOrange);
@@ -39,6 +43,9 @@ export default function AButton({
       testID={testID}
       disabled={disabled}
       onPress={onPress}
+      accessibilityRole={accessibilityRole}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ disabled }}
       style={({ pressed }) => ({
         opacity: disabled && disabledTint ? 0.3 : 1,
         backgroundColor: pressed ? colors.filterBorderColor : backgroundColor,

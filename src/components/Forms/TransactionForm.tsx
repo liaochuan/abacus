@@ -2,10 +2,11 @@ import React, {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import {
-  Keyboard, Platform, KeyboardAvoidingView, ScrollView, Switch, ActivityIndicator,
+  Alert, Keyboard, Platform, KeyboardAvoidingView, ScrollView, Switch, ActivityIndicator,
 } from 'react-native';
 import { useDispatch, useSelector } from 'react-redux';
 import * as Haptics from 'expo-haptics';
@@ -16,9 +17,15 @@ import TransactionSplitForm from '../Forms/TransactionSplitForm';
 import { RootDispatch, RootState } from '../../store';
 import translate from '../../i18n/locale';
 import GroupTitle from './Fields/GroupTitle';
+import { submitFeedback } from './submitFeedback';
+import { getDb } from '../../db/instance';
+import { saveLocalTransaction } from '../../db/repository';
+import { getCurrentScope } from '../../db/scope';
+import { isOnline } from '../../lib/network';
+import { requestSync } from '../../lib/syncScheduler';
 
 import Loading from '../UI/Loading';
-import { initialSplit } from '../../models/transactions';
+import { initialSplit, TransactionType } from '../../models/transactions';
 import { AStackFlex, AText, AView } from '../UI/ALibrary';
 import AButton from '../UI/ALibrary/AButton';
 import { useThemeColors } from '../../lib/common';
@@ -106,26 +113,101 @@ export default function TransactionForm({
   title,
   splits = [],
   id = '-1',
+  baseUpdatedAt = null,
 }) {
   const { colors } = useThemeColors();
   const dispatch = useDispatch<RootDispatch>();
   const loading = useSelector((state: RootState) => state.loading.effects.transactions.upsertTransaction?.loading);
   const closeTransactionScreen = useSelector((state: RootState) => state.configuration.closeTransactionScreen);
+  const transactionPayload = useSelector((state: RootState) => state.transactions.transactionPayload);
+  const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
 
   useEffect(() => {
     dispatch.transactions.resetTransaction({ splits, title });
   }, []);
 
+  // 表单主体用 useMemo([]) 缓存，handleSubmit 的闭包会停留在首帧；
+  // 因此提交时从 ref 读取最新表单状态，避免用到过期的交易内容或开关值。
+  const submitState = useRef({
+    transactionPayload, currentCode, id, closeTransactionScreen, baseUpdatedAt,
+  });
+  submitState.current = {
+    transactionPayload, currentCode, id, closeTransactionScreen, baseUpdatedAt,
+  };
+  // 本地写入很快，但没有网络请求的 loading 态可依赖；用同步 ref 防止连点产生重复本地交易。
+  const submittingRef = useRef(false);
+
   const handleSubmit = async () => {
+    if (submittingRef.current) {
+      return;
+    }
+    submittingRef.current = true;
     Keyboard.dismiss();
+    const {
+      transactionPayload: payload, currentCode: code, id: formId, closeTransactionScreen: shouldClose,
+      baseUpdatedAt: base,
+    } = submitState.current;
+    const isCreate = !formId || formId === '-1';
+    const online = isOnline();
+
     try {
-      await dispatch.transactions.upsertTransaction({ id });
+      const db = getDb();
+      const scopeId = await getCurrentScope(db);
+      if (!scopeId) {
+        throw new Error('no active account scope');
+      }
+      const splits = (payload?.transactions ?? []).map((split) => ({
+        ...split,
+        // 与旧的 UI→API 归一化保持一致：金额用点号小数，空串保持空串。
+        amount: split.amount ? split.amount.replace(',', '.') : '',
+        foreignAmount: split.foreignAmount ? split.foreignAmount.replace(',', '.') : '',
+        // 未选分类时显式写空串，避免把旧分类 id 带进本地 payload。
+        categoryId: split.categoryName === '' ? '' : split.categoryId,
+        // 离线缓存的账户选项不带币种，空值用当前账户币种兜底；符号保持为空。
+        currencyCode: split.currencyCode || code,
+      }));
+      // 当前币种也取不到时宁可中止，也不写入一条没有币种的交易。
+      if (splits.some((split) => !split.currencyCode)) {
+        Alert.alert(translate('error_widget_title'));
+        return;
+      }
+      const transaction: TransactionType = {
+        id: isCreate ? '' : formId,
+        type: 'transactions',
+        attributes: {
+          groupTitle: payload?.title ?? '',
+          transactions: splits,
+          user: '',
+          createdAt: '',
+          updatedAt: '',
+        },
+      };
+
+      await saveLocalTransaction(db, scopeId, {
+        id: isCreate ? undefined : formId,
+        payload: transaction,
+        // 编辑基线由详情页从本地记录读出（serverUpdatedAt），新建时为 null。
+        baseUpdatedAt: isCreate ? null : base ?? null,
+      });
+
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch();
-      if (closeTransactionScreen) {
+      Alert.alert(translate(submitFeedback(online) === 'saved_pending'
+        ? 'transaction_saved_pending'
+        : 'transaction_saved_synced'));
+      if (online) {
+        // 保存成功即尝试推送：离线时不触发（requestSync 自己也会跳成 offline，
+        // 但这里提前跳过可以避免保存后无意义的单飞锁占用）。
+        requestSync('after-save').catch(() => {});
+      }
+      if (shouldClose) {
         navigation.goBack();
       }
     } catch (e) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch();
+      // 本地写入失败走 ErrorWidget 的统一错误提示（loading 插件记录 configuration 的错误）。
+      dispatch.configuration.reportError(e instanceof Error ? e : new Error(String(e))).catch(() => {});
+    } finally {
+      submittingRef.current = false;
     }
   };
 
@@ -135,7 +217,7 @@ export default function TransactionForm({
         loading ? <ActivityIndicator size="small" color={colors.text} /> : <AText onPress={handleSubmit} fontSize={16} bold>{translate('transaction_form_submit_button')}</AText>
       ),
     });
-  }, [navigation, dispatch, title, splits, id, loading]);
+  }, [navigation, dispatch, title, splits, id, baseUpdatedAt, loading]);
 
   return useMemo(
     () => (

@@ -9,13 +9,16 @@ import {
 import { isEmpty, round } from 'lodash';
 import { AntDesign } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { useDispatch, useSelector } from 'react-redux';
+import { useSelector } from 'react-redux';
 
 import { ScrollView, View, Pressable } from 'react-native';
 import { getLocales } from 'expo-localization';
 import Loading from '../UI/Loading';
 import { useThemeColors } from '../../lib/common';
-import { RootDispatch, RootState } from '../../store';
+import { RootState } from '../../store';
+import { blobKeys } from '../../db/keys';
+import { useBlob } from '../../db/useBlob';
+import { isOnline } from '../../lib/network';
 import translate from '../../i18n/locale';
 import { AStackFlex, AText } from '../UI/ALibrary';
 import ErrorBoundary from '../UI/ErrorBoundary';
@@ -25,11 +28,13 @@ export default function BalanceHistoryChart() {
   const { colors } = useThemeColors();
   const start = useSelector((state: RootState) => state.firefly.rangeDetails.start);
   const end = useSelector((state: RootState) => state.firefly.rangeDetails.end);
-  const earnedChart = useSelector((state: RootState) => state.firefly.earnedChart);
-  const spentChart = useSelector((state: RootState) => state.firefly.spentChart);
-  const loading = useSelector((state: RootState) => state.loading.effects.firefly.getBalanceChart.loading);
   const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
-  const dispatch = useDispatch<RootDispatch>();
+  const { data: balanceData, stale, fetchedAt, error: balanceError } = useBlob<{ earnedChart: { x: number; y: number }[]; spentChart: { x: number; y: number }[] }>(blobKeys.chartBalance(start, end, currentCode));
+  const earnedChart = balanceData?.earnedChart ?? [];
+  const spentChart = balanceData?.spentChart ?? [];
+  const loading = balanceData === null && isOnline() && !balanceError;
+  // 首次在线加载时 fetchedAt 仍为 null，此时不算「过期」，避免一进页面就提示。
+  const showStaleMarker = (stale && fetchedAt !== null) || !isOnline();
 
   const getTickValues = useCallback(() => {
     const dateArray = [];
@@ -73,12 +78,14 @@ export default function BalanceHistoryChart() {
             <Pressable
               onPress={() => {
                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch();
-                dispatch.firefly.getBalanceChart();
               }}
             >
               <AntDesign name="reload" size={24} color={colors.text} />
             </Pressable>
           </AStackFlex>
+          {showStaleMarker && (
+            <AText px={10}>{translate('offline_data_stale')}</AText>
+          )}
           {loading && (
           <AStackFlex justifyContent="center">
             <AStackFlex row style={{ height: 400 }} alignItems="center">

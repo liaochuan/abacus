@@ -9,6 +9,7 @@ import { getLocales } from 'expo-localization';
 
 import translate from '../../i18n/locale';
 import { useThemeColors } from '../../lib/common';
+import { useOnlineGuard } from '../../lib/useOnlineGuard';
 import AutocompleteField from './Fields/AutocompleteField';
 import { RootDispatch, RootState } from '../../store';
 import { TransactionSplitType, types } from '../../models/transactions';
@@ -34,6 +35,8 @@ export default function TransactionSplitForm({
   const displayForeignCurrency = useSelector((state: RootState) => state.configuration.displayForeignCurrency);
   const dispatch = useDispatch<RootDispatch>();
   const { colorScheme, colors } = useThemeColors();
+  // 离线时自动补全只读本地缓存，不发网络请求（候选来自同步写入的 autocomplete:* blob）。
+  const { online } = useOnlineGuard();
   const [formData, setData] = useState<TransactionSplitType>({
     ...transaction,
     date: new Date(transaction.date),
@@ -289,6 +292,7 @@ export default function TransactionSplitForm({
 
       <AutocompleteField
         isRequired
+        offline={!online}
         label={translate('transaction_form_description_label')}
         placeholder={translate('transaction_form_description_label')}
         value={formData.description}
@@ -308,6 +312,7 @@ export default function TransactionSplitForm({
 
       <AutocompleteField
         isRequired={['withdrawal', 'transfer'].includes(formData.type)}
+        offline={!online}
         label={translate('transaction_form_sourceAccount_label')}
         placeholder={translate('transaction_form_sourceAccount_label')}
         value={formData.sourceName}
@@ -329,6 +334,7 @@ export default function TransactionSplitForm({
 
       <AutocompleteField
         isRequired={['deposit', 'transfer'].includes(formData.type)}
+        offline={!online}
         label={translate('transaction_form_destinationAccount_label')}
         placeholder={translate('transaction_form_destinationAccount_label')}
         value={formData.destinationName}
@@ -349,6 +355,7 @@ export default function TransactionSplitForm({
 
       <AutocompleteField
         label={translate('transaction_form_category_label')}
+        offline={!online}
         placeholder={translate('transaction_form_category_label')}
         value={formData.categoryName}
         onChangeText={(value) => setTransaction({
@@ -366,6 +373,7 @@ export default function TransactionSplitForm({
 
       <AutocompleteField
         label={translate('transaction_form_budget_label')}
+        offline={!online}
         placeholder={translate('transaction_form_budget_label')}
         value={formData.budgetName}
         onChangeText={(value: string) => setTransaction({
@@ -383,6 +391,7 @@ export default function TransactionSplitForm({
 
       <AutocompleteField
         label={translate('transaction_form_bill_label')}
+        offline={!online}
         placeholder={translate('transaction_form_bill_label')}
         value={formData.billName}
         onChangeText={(value: string) => setTransaction({
@@ -400,6 +409,7 @@ export default function TransactionSplitForm({
 
       <AutocompleteField
         multiple
+        offline={!online}
         label={translate('transaction_form_tags_label')}
         placeholder={translate('transaction_form_tags_label')}
         value={formData.tags}

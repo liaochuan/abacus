@@ -41,4 +41,5 @@ export interface AStyle {
   borderBottomRightRadius?: number
   borderBottomLeftRadius?: number
   borderLeftWidth?: number
+  opacity?: number
 }

@@ -21,7 +21,6 @@ import {
   View, Pressable,
   TouchableOpacity,
 } from 'react-native';
-import axios from 'axios';
 import type { PagerViewOnPageScrollEventData } from 'react-native-pager-view';
 import PagerView from 'react-native-pager-view';
 
@@ -31,8 +30,20 @@ import moment from 'moment';
 import { RootDispatch, RootState } from '../../store';
 import translate from '../../i18n/locale';
 import { localNumberFormat, useThemeColors } from '../../lib/common';
+import { cachedCurrentCode } from '../../db/cachedCurrencies';
+import { blobKeys } from '../../db/keys';
+import { useBlob } from '../../db/useBlob';
+import { isOnline } from '../../lib/network';
+import { requestSync } from '../../lib/syncScheduler';
+import type { AccountType } from '../../models/accounts';
+import type { BillType } from '../../models/bills';
+import type { BudgetType } from '../../models/budgets';
+import type { CategoriesStateType } from '../../models/categories';
+import type { HomeDisplayType } from '../../models/firefly';
+import type { PiggyBank } from '../../models/piggyBanks';
 
 import Pagination from '../UI/Pagination';
+import SyncStatusBar from '../UI/SyncStatusBar';
 import {
   AScrollView,
   AStack,
@@ -47,14 +58,34 @@ import ErrorBoundary from '../UI/ErrorBoundary';
 
 const EXTRA_SCROLL_PADDING = 120;
 
+// 下拉刷新：先发起一轮后台同步（fire-and-forget，不阻塞刷新动画），
+// 同时照旧刷新各视图的展示数据（在线时仍走 Redux 的接口调用）。
+// 本函数不等同步结果：失败只改状态条，不打断下拉刷新。
+const refreshWithSync = (tasks: Promise<unknown>[]) => {
+  requestSync('manual').catch(() => {});
+  return Promise.all(tasks);
+};
+
+type SummaryBlob = {
+  netWorth: HomeDisplayType[];
+  spent: HomeDisplayType[];
+  earned: HomeDisplayType[];
+  balance: HomeDisplayType[];
+  bills: { paid: HomeDisplayType | null; unpaid: HomeDisplayType | null };
+};
+
 const AnimatedPagerView = Animated.createAnimatedComponent(PagerView);
 
 function AssetsAccounts() {
   const { colors } = useThemeColors();
   const tabBarHeight = useBottomTabBarHeight();
-  const accounts = useSelector((state: RootState) => state.accounts.accounts);
+  const start = useSelector((state: RootState) => state.firefly.rangeDetails.start);
+  const end = useSelector((state: RootState) => state.firefly.rangeDetails.end);
+  const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
   const displayAllAccounts = useSelector((state: RootState) => state.configuration.displayAllAccounts);
-  const loading = useSelector((state: RootState) => state.loading.effects.accounts.getAccounts?.loading);
+  const { data: accountsData, error: accountsError } = useBlob<AccountType[]>(blobKeys.accounts(start, end, currentCode, displayAllAccounts));
+  const accounts = accountsData ?? [];
+  const loading = accountsData === null && isOnline() && !accountsError;
   const dispatch = useDispatch<RootDispatch>();
   const selectedBrandStyle = useSelector((state: RootState) => state.configuration.selectedBrandStyle || colors.brandStyleOrange);
 
@@ -95,7 +126,7 @@ function AssetsAccounts() {
       refreshControl={(
         <RefreshControl
           refreshing={false}
-          onRefresh={() => Promise.all([
+          onRefresh={() => refreshWithSync([
             dispatch.accounts.getAccounts(),
             dispatch.firefly.getNetWorth(),
           ])}
@@ -220,11 +251,14 @@ function AssetsAccounts() {
 function InsightCategories() {
   const { colors } = useThemeColors();
   const tabBarHeight = useBottomTabBarHeight();
-  const insightCategories = useSelector((state: RootState) => state.categories.insightCategories);
-  const insightCategoriesTotal = useSelector((state: RootState) => state.categories.total);
-  const insightCategoriesPerDay = useSelector((state: RootState) => state.categories.perDay);
-  const loading = useSelector((state: RootState) => state.loading.effects.categories.getInsightCategories?.loading);
   const startDate = useSelector((state: RootState) => state.firefly.rangeDetails.start);
+  const end = useSelector((state: RootState) => state.firefly.rangeDetails.end);
+  const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
+  const { data: categoriesData, error: categoriesError } = useBlob<CategoriesStateType>(blobKeys.categories(startDate, end, currentCode));
+  const insightCategories = categoriesData?.insightCategories ?? [];
+  const insightCategoriesTotal = categoriesData?.total;
+  const insightCategoriesPerDay = categoriesData?.perDay;
+  const loading = categoriesData === null && isOnline() && !categoriesError;
   const dispatch = useDispatch<RootDispatch>();
   const navigation = useNavigation();
   const expensesOnly = useSelector((state: RootState) => state.configuration.displayOnlyExpenseCategories);
@@ -235,14 +269,17 @@ function InsightCategories() {
     return Promise.resolve();
   };
 
-  const goToTransactions = async (id: string, transactionSearch: string) => {
+  const goToTransactions = async (
+    id: string,
+    transactionParams: { categoryId?: string; hasAnyCategory?: boolean },
+  ) => {
     navigation.dispatch(
       CommonActions.navigate(translate('navigation_transactions_tab'), {
         screen: 'TransactionsScreen',
         merge: true,
         params: {
           id,
-          transactionSearch,
+          ...transactionParams,
           startDate: new Date(`${startDate}T12:00:00`),
         },
       }),
@@ -256,7 +293,7 @@ function InsightCategories() {
       refreshControl={(
         <RefreshControl
           refreshing={false}
-          onRefresh={() => Promise.all([
+          onRefresh={() => refreshWithSync([
             dispatch.categories.getInsightCategories(),
             dispatch.firefly.getNetWorth(),
           ])}
@@ -280,9 +317,9 @@ function InsightCategories() {
             onPress={() => {
               if (category.name === 'total' || category.name === 'perday') return;
               if (category.name === 'no-category') {
-                goToTransactions(category.id, 'has_any_category:false');
+                goToTransactions(category.id, { hasAnyCategory: false });
               } else {
-                goToTransactions(category.id, `category_is:"${category.name}"`);
+                goToTransactions(category.id, { categoryId: category.id });
               }
             }}
           >
@@ -351,8 +388,12 @@ function InsightCategories() {
 function InsightBudgets() {
   const { colors } = useThemeColors();
   const tabBarHeight = useBottomTabBarHeight();
-  const insightBudgets = useSelector((state: RootState) => state.budgets.budgets);
-  const loading = useSelector((state: RootState) => state.loading.effects.budgets.getInsightBudgets?.loading);
+  const start = useSelector((state: RootState) => state.firefly.rangeDetails.start);
+  const end = useSelector((state: RootState) => state.firefly.rangeDetails.end);
+  const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
+  const { data: budgetsData, error: budgetsError } = useBlob<BudgetType[]>(blobKeys.budgets(start, end, currentCode));
+  const insightBudgets = budgetsData ?? [];
+  const loading = budgetsData === null && isOnline() && !budgetsError;
   const dispatch = useDispatch<RootDispatch>();
 
   return (
@@ -362,7 +403,7 @@ function InsightBudgets() {
       refreshControl={(
         <RefreshControl
           refreshing={false}
-          onRefresh={() => Promise.all([
+          onRefresh={() => refreshWithSync([
             dispatch.budgets.getInsightBudgets(),
             dispatch.firefly.getNetWorth(),
           ])}
@@ -436,13 +477,10 @@ function formatDate(date) {
 function Bills() {
   const { colors } = useThemeColors();
   const tabBarHeight = useBottomTabBarHeight();
-  const bills = useSelector((state: RootState) => state.bills.bills);
-  const loading = useSelector((state: RootState) => state.loading.effects.bills?.getBills?.loading);
+  const { data: billsData, error: billsError } = useBlob<BillType[]>(blobKeys.bills());
+  const bills = billsData ?? [];
+  const loading = billsData === null && isOnline() && !billsError;
   const dispatch = useDispatch<RootDispatch>();
-
-  useEffect(() => {
-    dispatch.bills.getBills();
-  }, [dispatch]);
 
   return (
     <AScrollView
@@ -451,7 +489,7 @@ function Bills() {
       refreshControl={(
         <RefreshControl
           refreshing={loading}
-          onRefresh={() => Promise.all([
+          onRefresh={() => refreshWithSync([
             dispatch.bills.getBills(),
             dispatch.firefly.getNetWorth(),
           ])}
@@ -532,8 +570,9 @@ function Bills() {
 function PiggyBanks() {
   const { colors } = useThemeColors();
   const tabBarHeight = useBottomTabBarHeight();
-  const piggyBanks = useSelector((state: RootState) => state.piggyBanks.piggyBanks);
-  const loading = useSelector((state: RootState) => state.loading.effects.piggyBanks?.getPiggyBanks?.loading);
+  const { data: piggyBanksData, error: piggyBanksError } = useBlob<PiggyBank[]>(blobKeys.piggyBanks());
+  const piggyBanks = piggyBanksData ?? [];
+  const loading = piggyBanksData === null && isOnline() && !piggyBanksError;
   const dispatch = useDispatch<RootDispatch>();
 
   return (
@@ -543,7 +582,7 @@ function PiggyBanks() {
       refreshControl={(
         <RefreshControl
           refreshing={false}
-          onRefresh={() => Promise.all([
+          onRefresh={() => refreshWithSync([
             dispatch.piggyBanks.getPiggyBanks(),
             dispatch.firefly.getNetWorth(),
           ])}
@@ -611,13 +650,19 @@ function PiggyBanks() {
 function NetWorth() {
   const { colors } = useThemeColors();
   const hideBalance = useSelector((state: RootState) => state.configuration.hideBalance);
-  const netWorth = useSelector((state: RootState) => state.firefly.netWorth);
-  const balance = useSelector((state: RootState) => state.firefly.balance);
-  const spent = useSelector((state: RootState) => state.firefly.earned);
-  const earned = useSelector((state: RootState) => state.firefly.spent);
   const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
-  const loading = useSelector((state: RootState) => state.loading.effects.firefly.getNetWorth?.loading);
+  const start = useSelector((state: RootState) => state.firefly.rangeDetails.start);
+  const end = useSelector((state: RootState) => state.firefly.rangeDetails.end);
   const dispatch = useDispatch<RootDispatch>();
+
+  const { data: summary, stale, fetchedAt, error: summaryError } = useBlob<SummaryBlob>(blobKeys.summary(start, end, currentCode));
+  const netWorth = summary?.netWorth ?? [];
+  const balance = summary?.balance ?? [];
+  const spent = summary?.spent ?? [];
+  const earned = summary?.earned ?? [];
+  const loading = summary === null && isOnline() && !summaryError;
+  // 首次在线加载时 fetchedAt 仍为 null，此时不算「过期」，避免一进页面就提示。
+  const showStaleMarker = (stale && fetchedAt !== null) || !isOnline();
 
   return useMemo(() => (
     <View testID="home_screen_net_worth">
@@ -647,6 +692,12 @@ function NetWorth() {
                 {localNumberFormat(currentCode, parseFloat(netWorth[0]?.monetaryValue || '0'))}
               </AText>
             </ASkeleton>
+
+            {showStaleMarker && (
+              <AText fontSize={10}>
+                {translate('offline_data_stale')}
+              </AText>
+            )}
 
             {balance && balance[0] && earned && earned[0] && spent && spent[0] && !hideBalance && (
               <ASkeleton loading={loading}>
@@ -701,6 +752,7 @@ function NetWorth() {
     earned,
     spent,
     currentCode,
+    showStaleMarker,
   ]);
 }
 
@@ -726,14 +778,24 @@ export default function HomeScreen() {
 
   useEffect(() => {
     (async () => {
-      await Promise.all([
+      // 两个请求互不依赖：用 allSettled 消费，任一失败都不会变成未处理的 rejection。
+      const [currencies] = await Promise.allSettled([
         dispatch.currencies.getCurrencies(),
         dispatch.configuration.getCurrentApiVersion(),
       ]);
+      if (currencies.status === 'fulfilled') {
+        return;
+      }
+      // 离线（或服务端不可达）时币种列表拉不到，currentCode 会一直是空串，
+      // 新增交易表单随后因没有币种而中止。回落到 currencies blob 里的当前币种，
+      // 只补 currentCode，币种列表等联网后的 getCurrencies 正常回填。
+      const code = await cachedCurrentCode();
+      if (code !== null) {
+        dispatch.currencies.setCurrentCode(code);
+      }
     })();
   }, []);
 
-  const prevFiltersRef = useRef<string>(null);
   const viewPagerRef = useRef<PagerView>(null);
   const scrollRef = useRef(null);
 
@@ -741,27 +803,10 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      let isActive = true;
-
-      const fetchData = () => {
-        if (isActive && axios.defaults.headers.Authorization) {
-          dispatch.firefly.getNetWorth();
-          dispatch.accounts.getAccounts();
-          dispatch.categories.getInsightCategories();
-          dispatch.budgets.getInsightBudgets();
-          dispatch.bills.getBills();
-          dispatch.piggyBanks.getPiggyBanks();
-        }
-      };
-
-      if (prevFiltersRef.current !== `${start}-${end}-${currentCode}`) {
-        fetchData();
-        prevFiltersRef.current = `${start}-${end}-${currentCode}`;
-      }
-
-      return () => {
-        isActive = false;
-      };
+      // 进入首页触发一轮同步：区间/币种变化后重新进入也会补拉。
+      // fire-and-forget：同步失败只影响状态条，页面继续显示本地缓存；
+      // 并发与重复触发由 requestSync 的单飞锁吸收。
+      requestSync('manual').catch(() => {});
     }, [start, end, currentCode]),
   );
 
@@ -775,8 +820,9 @@ export default function HomeScreen() {
           colors={gradientColors}
           start={{ x: 0, y: 1 }}
           end={{ x: 1, y: 0 }}
-          style={{ minHeight: 250 + safeAreaInsets.top, paddingTop: safeAreaInsets.top }}
+          style={{ minHeight: 250 + safeAreaInsets.top + 24 + 45, paddingTop: safeAreaInsets.top + 45 }}
         >
+          <SyncStatusBar />
           <AStackFlex>
             <NetWorth />
             <Pagination

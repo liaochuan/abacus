@@ -1,10 +1,19 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, {
+  useCallback, useMemo, useRef, useState,
+} from 'react';
 import axios from 'axios';
 import { useSelector } from 'react-redux';
 
 import { AntDesign, EvilIcons } from '@expo/vector-icons';
 import { RootState } from '../../../store';
 import { convertKeysToCamelCase, useThemeColors } from '../../../lib/common';
+import translate from '../../../i18n/locale';
+import {
+  filterAutocomplete, filterAutocompleteByTypes, readAutocomplete,
+} from '../../../db/autocomplete';
+import type { AutocompleteKind, AutocompleteOption } from '../../../db/autocomplete';
+import { getDb } from '../../../db/instance';
+import { getCurrentScope } from '../../../db/scope';
 import {
   AInput,
   APressable,
@@ -15,10 +24,36 @@ import {
   AFormView, AIconButton,
 } from '../../UI/ALibrary';
 
-type AutocompleteType = {
-  name: string,
-  id: string,
-}
+type AutocompleteType = AutocompleteOption;
+
+type OfflineCache = {
+  scopeId: string;
+  kind: AutocompleteKind;
+  options: AutocompleteOption[];
+};
+
+// 有离线缓存的自动补全体；descriptions（routeApi="transactions"）没有缓存，离线时只保留自由输入。
+const OFFLINE_KINDS: AutocompleteKind[] = ['accounts', 'categories', 'budgets', 'bills', 'tags'];
+
+const offlineKindOf = (routeApi: string): AutocompleteKind | null => (
+  OFFLINE_KINDS.includes(routeApi as AutocompleteKind) ? routeApi as AutocompleteKind : null
+);
+
+// 账户类型过滤的线上规则：designation-splitType 决定首选类型，再并上 Loan/Debt/Mortgage。
+// 离线用同一套名单过滤缓存，保证「所有账户类型」与「表单允许的类型」一致。
+const ACCOUNT_TYPE_BY_SPLIT: Record<string, string> = {
+  'source-withdrawal': 'Asset account',
+  'destination-withdrawal': 'Expense account',
+  'source-deposit': 'Revenue account',
+  'destination-deposit': 'Asset account',
+  'source-transfer': 'Asset account',
+  'destination-transfer': 'Asset account',
+};
+
+const accountTypesOf = (designation: string, splitType: string): string[] => {
+  const primary = ACCOUNT_TYPE_BY_SPLIT[`${designation}-${splitType}`];
+  return primary === undefined ? [] : [primary, 'Loan', 'Debt', 'Mortgage'];
+};
 
 export default function AutocompleteField({
   splitType = 'withdrawal',
@@ -34,26 +69,91 @@ export default function AutocompleteField({
   onDeleteMultiple = null,
   multiple = false,
   small = false,
+  offline = false,
 }) {
   const { colors } = useThemeColors();
   const backendURL = useSelector((state: RootState) => state.configuration.backendURL);
   const [multipleValue, setMultipleValue] = useState('');
-  const [autocompletes, setAutocompletes] = useState([]);
+  const [autocompletes, setAutocompletes] = useState<AutocompleteType[]>([]);
+  // 「缓存本身为空」与「过滤后为空」是两回事：只有前者才提示用户去同步。
+  const [cacheEmpty, setCacheEmpty] = useState(false);
   const [displayAutocomplete, setDisplayAutocomplete] = useState(false);
-  const refreshAutocomplete = async (query) => {
-    const limit = 10;
-    const accountTypeFilter = {
-      'source-withdrawal': 'Asset%20account',
-      'destination-withdrawal': 'Expense%20account',
-      'source-deposit': 'Revenue%20account',
-      'destination-deposit': 'Asset%20account',
-      'source-transfer': 'Asset%20account',
-      'destination-transfer': 'Asset%20account',
+
+  // 解析后的候选按 (scopeId, kind) 缓存：一次聚焦只读一次 blob，击键全在内存里过滤。
+  const cacheRef = useRef<OfflineCache | null>(null);
+  // 同 kind 的并发读取合并成一个 promise，避免慢读期间连续击键触发多次 blob 解析。
+  const inflightRef = useRef<{ kind: AutocompleteKind; promise: Promise<AutocompleteOption[]> } | null>(null);
+  const scopeRef = useRef('');
+  // 请求序号：慢的旧请求回来时直接丢弃，避免覆盖新输入的结果。
+  const requestRef = useRef(0);
+
+  const readOfflineOptions = useCallback((kind: AutocompleteKind): Promise<AutocompleteOption[]> => {
+    const cached = cacheRef.current;
+    if (cached !== null && cached.kind === kind && cached.scopeId === scopeRef.current) {
+      return Promise.resolve(cached.options);
+    }
+    const inflight = inflightRef.current;
+    if (inflight !== null && inflight.kind === kind) {
+      return inflight.promise;
+    }
+    const promise = (async () => {
+      const db = getDb();
+      const scopeId = await getCurrentScope(db);
+      scopeRef.current = scopeId;
+      const options = await readAutocomplete(db, scopeId, kind);
+      cacheRef.current = { scopeId, kind, options };
+      return options;
+    })();
+    inflightRef.current = { kind, promise };
+    // 成功/失败都清掉 in-flight 标记：失败时下一次击键可以重试。
+    const clearInflight = () => {
+      if (inflightRef.current?.promise === promise) {
+        inflightRef.current = null;
+      }
     };
-    const types = routeApi === 'accounts' ? `&types=${accountTypeFilter[`${designation}-${splitType}`]},Loan,Debt,Mortgage` : '';
+    promise.then(clearInflight, clearInflight);
+    return promise;
+  }, []);
+
+  const refreshAutocomplete = useCallback(async (query: string) => {
+    const limit = 10;
+    const requestId = requestRef.current + 1;
+    requestRef.current = requestId;
+
+    if (offline) {
+      const kind = offlineKindOf(routeApi);
+      if (kind === null) {
+        setAutocompletes([]);
+        setCacheEmpty(true);
+        return;
+      }
+      let options: AutocompleteOption[] = [];
+      try {
+        options = await readOfflineOptions(kind);
+      } catch {
+        // DB 未初始化或读取失败：退化为「没有候选」，不阻断手动输入。
+        options = [];
+      }
+      if (requestRef.current !== requestId) {
+        return;
+      }
+      setCacheEmpty(options.length === 0);
+      const types = routeApi === 'accounts' ? accountTypesOf(designation, splitType) : [];
+      setAutocompletes(filterAutocomplete(filterAutocompleteByTypes(options, types), query, limit));
+      return;
+    }
+
+    const accountTypes = routeApi === 'accounts' ? accountTypesOf(designation, splitType) : [];
+    const types = accountTypes.length > 0
+      ? `&types=${accountTypes.map((type) => encodeURIComponent(type)).join(',')}`
+      : '';
     const response = await axios.get(`${backendURL}/api/v1/autocomplete/${routeApi}?limit=${limit}${types}&query=${encodeURIComponent(query)}`);
-    setAutocompletes(convertKeysToCamelCase(response.data));
-  };
+    if (requestRef.current !== requestId) {
+      return;
+    }
+    setCacheEmpty(false);
+    setAutocompletes(convertKeysToCamelCase(response.data) as AutocompleteType[]);
+  }, [offline, routeApi, backendURL, designation, splitType, readOfflineOptions]);
 
   const handleChangeText = useCallback((text: string) => {
     if (multiple) {
@@ -62,7 +162,7 @@ export default function AutocompleteField({
       onChangeText(text);
     }
     refreshAutocomplete(text);
-  }, [multiple, onChangeText]);
+  }, [multiple, onChangeText, refreshAutocomplete]);
 
   const handleSelectAutocomplete = useCallback(async (autocomplete: AutocompleteType) => {
     onSelectAutocomplete(autocomplete);
@@ -72,19 +172,23 @@ export default function AutocompleteField({
     } else {
       setDisplayAutocomplete(false);
     }
-  }, [onSelectAutocomplete]);
+  }, [onSelectAutocomplete, multiple, refreshAutocomplete]);
 
   const handleDeleteMultiple = useCallback((item) => {
     onDeleteMultiple(item);
   }, [onDeleteMultiple]);
 
-  const handleFocus = () => {
+  const handleFocus = useCallback(() => {
+    // 每次聚焦重新校验缓存：切账号后 scope 变化能立即反映，同一次输入过程则复用内存结果。
+    cacheRef.current = null;
+    inflightRef.current = null;
     setDisplayAutocomplete(true);
     refreshAutocomplete(value && !small && !multiple ? value : '');
-  };
-  const handleBlur = () => {
+  }, [refreshAutocomplete, value, small, multiple]);
+
+  const handleBlur = useCallback(() => {
     setDisplayAutocomplete(false);
-  };
+  }, []);
 
   return useMemo(
     () => (
@@ -122,7 +226,7 @@ export default function AutocompleteField({
         <AInput
           height={40}
           returnKeyType="done"
-          onSubmitEditing={({ nativeEvent: { text } }) => ((multiple && text !== '') ? handleSelectAutocomplete({ name: text }) : null)}
+          onSubmitEditing={({ nativeEvent: { text } }) => ((multiple && text !== '') ? handleSelectAutocomplete({ name: text, id: '' }) : null)}
           placeholder={placeholder}
           value={!multiple ? value : multipleValue}
           onChangeText={handleChangeText}
@@ -136,7 +240,7 @@ export default function AutocompleteField({
             {autocompletes.map((autocomplete: AutocompleteType) => (
               <APressable
                 style={{ borderRadius: 10, paddingLeft: 5 }}
-                key={autocomplete.id}
+                key={autocomplete.id || autocomplete.name}
                 onPress={() => handleSelectAutocomplete(autocomplete)}
               >
                 <AStack
@@ -150,11 +254,17 @@ export default function AutocompleteField({
                 </AStack>
               </APressable>
             ))}
+            {offline && routeApi === 'accounts' && cacheEmpty && (
+              <AText px={5} py={5} fontSize={13} numberOfLines={2}>
+                {translate('offline_no_accounts')}
+              </AText>
+            )}
           </AView>
         )}
       </AFormView>
     ),
     [
+      colors,
       isRequired,
       label,
       placeholder,
@@ -163,9 +273,19 @@ export default function AutocompleteField({
       designation,
       small,
       splitType,
+      offline,
+      routeApi,
+      backendURL,
+      InputRightElement,
       multipleValue,
       autocompletes,
+      cacheEmpty,
       displayAutocomplete,
+      handleChangeText,
+      handleFocus,
+      handleBlur,
+      handleSelectAutocomplete,
+      handleDeleteMultiple,
     ],
   );
 }

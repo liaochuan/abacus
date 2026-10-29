@@ -47,6 +47,7 @@ import {
   AText,
 } from '../components/UI/ALibrary';
 import PrivacyScreen from '../components/UI/PrivacyScreen';
+import SyncNoticeModal from '../components/UI/SyncNoticeModal';
 import { AbacusQuickAction } from '../types/quickAction';
 import ErrorBoundary from '../components/UI/ErrorBoundary';
 
@@ -411,6 +412,9 @@ export default function Index() {
           />
         </ModalStack.Group>
       </Stack.Navigator>
+
+      {/* 提示弹窗挂在导航容器内、导航器之上：不随页面切换卸载，也不遮挡自身。 */}
+      <SyncNoticeModal />
     </NavigationContainer>
   );
 }

@@ -8,6 +8,23 @@ import ToastMessage from './ToastMessage';
 import translate from '../../i18n/locale';
 import useToasts from './useToasts';
 
+type ErrorPayload = { message?: string };
+
+// 本地写入抛的是普通 Error（没有 response），不能直接读 response.data.message。
+// 优先用服务端返回的错误文案，其次用 Error.message，最后退到通用标题。
+const errorMessageOf = (error: unknown): string => {
+  const axiosError = error as AxiosError<ErrorPayload> | undefined;
+  const responseMessage = axiosError?.response?.data?.message;
+  if (typeof responseMessage === 'string' && responseMessage !== '') {
+    return responseMessage;
+  }
+  const message = (error as { message?: unknown } | undefined)?.message;
+  if (typeof message === 'string' && message !== '') {
+    return message;
+  }
+  return translate('error_widget_title');
+};
+
 export default function ErrorWidget() {
   const { showToast, toasts, removeToast } = useToasts();
   const error = useSelector((state: RootState) => state.loading.models.configuration.error);
@@ -28,9 +45,8 @@ export default function ErrorWidget() {
   const isFirstRun = useRef(true);
   useEffect(() => {
     (async () => {
-      if (error && (error as Error).message && !isFirstRun.current) {
-        const message = (error as AxiosError).response.data?.message ? (error as AxiosError).response.data?.message : (error as Error).message;
-        showToast(translate('error_widget_title'), message, 'error');
+      if (error && !isFirstRun.current) {
+        showToast(translate('error_widget_title'), errorMessageOf(error), 'error');
       }
 
       if (success && !isFirstRun.current) {

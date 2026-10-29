@@ -140,6 +140,12 @@ export default createModel<RootModel>()({
 
   effects: (dispatch) => ({
 
+    // 本地写入失败需要复用 ErrorWidget 的统一错误提示。@rematch/loading 只在 effect
+    // 抛错时记录 state.loading.models.configuration.error，因此提供这个显式入口。
+    async reportError(error: Error): Promise<never> {
+      throw error;
+    },
+
     async apiFetch({ url, config }, rootState): Promise<FireflyIIIApiResponse> {
       const {
         configuration: {

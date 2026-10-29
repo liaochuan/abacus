@@ -98,27 +98,5 @@ export const generateRangeTitle = (range: number, start: string, end: string): s
   return title;
 };
 
-const snakeToCamel = (str) => str.replace(/(_\w)/g, (match) => match[1].toUpperCase());
-
-export const convertKeysToCamelCase = (data) => {
-  if (Array.isArray(data)) {
-    return data.map((item) => convertKeysToCamelCase(item));
-  }
-  if (typeof data === 'object' && data !== null) {
-    const camelCaseData = {};
-    Object.keys(data).forEach((key) => {
-      if (Object.hasOwn(data, key)) {
-        const camelKey = snakeToCamel(key);
-        if (typeof data[key] === 'object' && data[key] !== null) {
-          camelCaseData[camelKey] = convertKeysToCamelCase(data[key]);
-        } else {
-          camelCaseData[camelKey] = data[key];
-        }
-      }
-    });
-
-    return camelCaseData;
-  }
-
-  return data;
-};
+// 纯函数实现已移到 src/lib/case.ts（零依赖），这里只做转发以保持既有 import 不变。
+export { convertKeysToCamelCase } from './case';

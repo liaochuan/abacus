@@ -19,7 +19,7 @@ import {
   MaterialIcons,
 } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { useDispatch, useSelector } from 'react-redux';
+import { useDispatch } from 'react-redux';
 import {
   CommonActions,
   useFocusEffect,
@@ -27,9 +27,16 @@ import {
 } from '@react-navigation/native';
 
 import { SearchBarCommands } from 'react-native-screens';
-import { GetTransactionsPayload, TransactionSplitType, TransactionType } from '../../models/transactions';
-import { RootDispatch, RootState } from '../../store';
+import { TransactionSplitType, TransactionType } from '../../models/transactions';
+import { RootDispatch } from '../../store';
 import translate from '../../i18n/locale';
+import { getDb } from '../../db/instance';
+import { nextPageOffset } from '../../db/pagination';
+import { listTransactions, TransactionQueryFilters, deleteLocalTransaction } from '../../db/repository';
+import { getCurrentScope } from '../../db/scope';
+import { startOfCurrentQuarter } from '../../lib/dateRange';
+import { requestSync } from '../../lib/syncScheduler';
+import { useOnlineGuard } from '../../lib/useOnlineGuard';
 import { D_WIDTH, localNumberFormat, useThemeColors } from '../../lib/common';
 import { ScreenType } from '../../types/screen';
 import {
@@ -38,31 +45,36 @@ import {
 import AFilterButton from '../UI/ALibrary/AFilterButton';
 import AButton from '../UI/ALibrary/AButton';
 import ADateFilterButton from '../UI/ALibrary/ADateFilterButton';
+import SyncStatusBar from '../UI/SyncStatusBar';
 
 const ITEM_HEIGHT = 90;
+// 本地分页每页条数。本地库没有廉价 COUNT，total 传 Infinity，翻页靠短页/空页结束。
+const PAGE_SIZE = 50;
 
 const resetTransactionsDates = (transactions: TransactionSplitType[]) => transactions.map((t) => ({
   ...t,
   date: new Date().toISOString(),
 }));
 
-function ListFooterComponent({ onLoadMore, initLoading }) {
+function ListFooterComponent({ onLoadMore, loading, hasMore }) {
   const { colors } = useThemeColors();
-  const loading = useSelector((state: RootState) => state.loading.effects.transactions.getMoreTransactions?.loading);
-  const { page, totalPages } = useSelector((state: RootState) => state.transactions);
 
-  return useMemo(() => (loading || initLoading || (page < totalPages)) && (
+  if (!loading && !hasMore) {
+    return null;
+  }
+
+  return (
     <AStackFlex
       style={{
         height: ITEM_HEIGHT,
       }}
     >
-      {(loading || initLoading) && (
+      {loading && (
       <AStackFlex py={10} px={10}>
         <ActivityIndicator color={colors.text} />
       </AStackFlex>
       )}
-      {(!initLoading && !loading && (page < totalPages)) && (
+      {(!loading && hasMore) && (
         <AButton style={{ height: 40 }} mx={30} onPress={onLoadMore}>
           <AStackFlex row>
             <Ionicons name="cloud-download" size={15} color="white" style={{ margin: 5 }} />
@@ -71,13 +83,7 @@ function ListFooterComponent({ onLoadMore, initLoading }) {
         </AButton>
       )}
     </AStackFlex>
-  ), [
-    colors,
-    page,
-    totalPages,
-    loading,
-    initLoading,
-  ]);
+  );
 }
 
 function RenderItem({ item }) {
@@ -247,9 +253,10 @@ function RenderItem({ item }) {
   ), [item, colors]);
 }
 
-async function deleteAlert(transaction: TransactionType, rowMap, closeRow, deleteRow) {
+async function deleteAlert(transaction: TransactionType, rowMap, closeRow, deleteRow, guard) {
   Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch();
-  Alert.alert(
+  // 离线时删除会失败：本地只读展示，删除交给同步层（尚未支持离线删除）。这里直接拦截，不弹确认框。
+  guard(() => Alert.alert(
     translate('transaction_list_alert_title'),
     `${translate('transaction_list_alert_text')}\n`
     + `${transaction?.attributes?.transactions[0]?.description}\n`
@@ -266,10 +273,10 @@ async function deleteAlert(transaction: TransactionType, rowMap, closeRow, delet
         style: 'cancel',
       },
     ],
-  );
+  ));
 }
 
-function RenderHiddenItem({ handleOnPressCopy, handleOnPressDelete }) {
+function RenderHiddenItem({ handleOnPressCopy, handleOnPressDelete, online }) {
   const { colors } = useThemeColors();
 
   return useMemo(() => (
@@ -302,6 +309,8 @@ function RenderHiddenItem({ handleOnPressCopy, handleOnPressDelete }) {
           paddingHorizontal: 10,
           borderTopWidth: 0.5,
           borderColor: colors.listBorderColor,
+          // 离线时置灰但仍可点击，点按后由 guard 弹出原因提示。
+          opacity: online ? 1 : 0.4,
         }}
         onPress={handleOnPressDelete}
       >
@@ -315,58 +324,137 @@ function RenderHiddenItem({ handleOnPressCopy, handleOnPressDelete }) {
         </AStackFlex>
       </APressable>
     </AStackFlex>
-  ), [handleOnPressCopy, handleOnPressDelete]);
+  ), [handleOnPressCopy, handleOnPressDelete, online]);
 }
 
 export default function TransactionsScreen({ navigation, route }: ScreenType) {
   const { params } = route;
   const { colors } = useThemeColors();
   const [loading, setLoading] = useState<boolean>(false);
+  const [loadingMore, setLoadingMore] = useState<boolean>(false);
+  const [error, setError] = useState<boolean>(false);
   const [transactions, setTransactions] = useState<TransactionType[]>([]);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const generationRef = React.useRef(0);
+  const loadingMoreRef = React.useRef(false);
   const [search, setSearch] = useState('');
-  const defaultStart = useSelector((state: RootState) => state.firefly.rangeDetails.start);
-  const [start, setStartDate] = useState<Date>(new Date(`${defaultStart}T12:00:00`));
-  const defaultEnd = useSelector((state: RootState) => state.firefly.rangeDetails.end);
-  const [end] = useState<Date>(new Date(`${defaultEnd}T12:00:00`));
+  const searchInputRef = React.useRef('');
+  const [reloadToken, setReloadToken] = useState(0);
+  // 首帧就用下钻参数或当前季度起点，避免先查默认区间再查目标区间。
+  const [startDate, setStartDate] = useState<Date>(() => params?.startDate ?? startOfCurrentQuarter());
   const [account, setAccount] = useState<string>('');
   const [type, setType] = useState<'' | 'withdrawal' | 'deposit' | 'transfer'>('');
   const [currentCode, setCurrentCode] = useState('');
-  const {
-    transactions: {
-      getMoreTransactions,
-      getTransactions,
-      deleteTransaction,
-    },
-  } = useDispatch<RootDispatch>();
+  // 分类下钻用结构化参数（分类 id / 无分类），不再拼 Firefly 搜索串。
+  const [categoryId, setCategoryId] = useState<string | undefined>(params?.categoryId);
+  const [hasAnyCategory, setHasAnyCategory] = useState<boolean | undefined>(params?.hasAnyCategory);
+  const dispatch = useDispatch<RootDispatch>();
+  const { online, guard } = useOnlineGuard();
 
-  const searchBarRef = React.useRef<SearchBarCommands>();
+  const searchBarRef = React.useRef<SearchBarCommands | null>(null);
+
+  // 空字符串一律转成 undefined：该维度不参与筛选。
+  const filters = useMemo<TransactionQueryFilters>(() => ({
+    start: moment(startDate).format('YYYY-MM-DD'),
+    type: type === '' ? undefined : type,
+    currencyCode: currentCode === '' ? undefined : currentCode,
+    account: account === '' ? undefined : account,
+    text: search === '' ? undefined : search,
+    categoryId,
+    hasAnyCategory,
+  }), [account, categoryId, currentCode, hasAnyCategory, search, startDate, type]);
+
+  // 首屏与筛选变化时从 offset 0 重读；generation 用于丢弃过期结果（含加载更多）。
+  useEffect(() => {
+    const generation = generationRef.current + 1;
+    generationRef.current = generation;
+
+    const load = async () => {
+      setLoading(true);
+      try {
+        const db = getDb();
+        const scopeId = await getCurrentScope(db);
+        const page = await listTransactions(db, scopeId, { ...filters, limit: PAGE_SIZE, offset: 0 });
+        if (generation !== generationRef.current) {
+          return;
+        }
+        setTransactions(page.map((record) => record.payload));
+        setError(false);
+        // 本地库没有廉价 COUNT：total 传 Infinity，翻页在短页/空页时结束。
+        setNextOffset(nextPageOffset(
+          { offset: 0, limit: PAGE_SIZE, received: page.length },
+          Number.POSITIVE_INFINITY,
+        ));
+      } catch {
+        if (generation !== generationRef.current) {
+          return;
+        }
+        // 读取失败保留现有列表（可能为空），并给出可见提示，避免误当成"没有交易"。
+        setError(true);
+        setNextOffset(null);
+      } finally {
+        if (generation === generationRef.current) {
+          setLoading(false);
+        }
+      }
+    };
+
+    load();
+  }, [filters, reloadToken]);
+
   const onLoadMore = async () => {
-    const payload: GetTransactionsPayload = {
-      start,
-      end,
-      type,
-      currentCode,
-      account,
-      search,
-    };
-    const effectTransactions = await getMoreTransactions(payload);
-    setTransactions([...transactions, ...effectTransactions]);
+    if (nextOffset === null || loadingMoreRef.current) {
+      return;
+    }
+    const generation = generationRef.current;
+    const offset = nextOffset;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const db = getDb();
+      const scopeId = await getCurrentScope(db);
+      const page = await listTransactions(db, scopeId, { ...filters, limit: PAGE_SIZE, offset });
+      if (generation !== generationRef.current) {
+        return;
+      }
+      setTransactions((prev) => {
+        const seen = new Set(prev.map((item) => item.id));
+        const additions = page
+          .map((record) => record.payload)
+          .filter((item) => !seen.has(item.id));
+        return [...prev, ...additions];
+      });
+      setError(false);
+      setNextOffset(nextPageOffset(
+        { offset, limit: PAGE_SIZE, received: page.length },
+        Number.POSITIVE_INFINITY,
+      ));
+    } catch {
+      if (generation === generationRef.current) {
+        setError(true);
+        setNextOffset(null);
+      }
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }
   };
 
-  const onLoad = async () => {
-    const payload: GetTransactionsPayload = {
-      start,
-      end,
-      type,
-      currentCode,
-      account,
-      search,
-    };
-    setLoading(true);
-    const effectTransactions = await getTransactions(payload);
-    setTransactions(effectTransactions);
-    setLoading(false);
-  };
+  const reload = useCallback(() => {
+    setReloadToken((token) => token + 1);
+  }, []);
+
+  // 下拉刷新：先发起后台同步（不阻塞动画），同时重查本地列表。
+  const manualRefresh = useCallback(() => {
+    requestSync('manual').catch(() => {});
+    reload();
+  }, [reload]);
+
+  // 搜索栏输入只写 ref；blur/回车时提交并重新查询本地库。
+  const applySearch = useCallback(() => {
+    setSearch(searchInputRef.current.trim());
+    setReloadToken((token) => token + 1);
+  }, []);
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -377,59 +465,37 @@ export default function TransactionsScreen({ navigation, route }: ScreenType) {
         headerIconColor: colors.text,
         textColor: colors.text,
         hintTextColor: colors.text,
-        onChangeText: (event) => setSearch(event.nativeEvent.text),
-        onBlur: () => onLoad(),
-        onSearchButtonPress: () => onLoad(),
+        onChangeText: (event) => {
+          searchInputRef.current = event.nativeEvent.text;
+        },
+        onBlur: () => applySearch(),
+        onSearchButtonPress: () => applySearch(),
         disableBackButtonOverride: true,
         shouldShowHintSearchIcon: false,
       },
     });
-    // set search bar on first screen open
-    if (params?.transactionSearch !== undefined) {
-      const p = { ...params };
-      setTimeout(() => {
-        setSearch(p?.transactionSearch);
-        searchBarRef.current?.focus();
-        searchBarRef.current?.setText(p?.transactionSearch);
-        searchBarRef.current?.blur();
-      }, 500);
-    }
-  }, [navigation, search]);
+  }, [applySearch, colors, navigation]);
 
   useFocusEffect(
     useCallback(() => {
-      let isActive = true;
-
       if (params?.forceRefresh === true) {
-        if (isActive) {
-          onLoad().catch();
-          navigation.setParams({ forceRefresh: false });
-        }
+        reload();
+        navigation.setParams({ forceRefresh: false });
       }
 
-      if (params?.transactionSearch !== undefined) {
-        setSearch(params?.transactionSearch);
-        searchBarRef.current?.focus();
-        searchBarRef.current?.setText(params?.transactionSearch);
-        searchBarRef.current?.blur();
-        // disabled
-        params.transactionSearch = undefined;
+      // 分类下钻参数消费一次后清掉，避免下次进入重复应用。
+      if (params?.categoryId !== undefined || params?.hasAnyCategory !== undefined) {
+        setCategoryId(params?.categoryId);
+        setHasAnyCategory(params?.hasAnyCategory);
+        navigation.setParams({ categoryId: undefined, hasAnyCategory: undefined });
       }
 
       if (params?.startDate !== undefined) {
         setStartDate(params.startDate);
-        params.startDate = undefined;
+        navigation.setParams({ startDate: undefined });
       }
-
-      return () => {
-        isActive = false;
-      };
-    }, [params, currentCode, type]),
+    }, [navigation, params, reload]),
   );
-
-  useEffect(() => {
-    onLoad().catch();
-  }, [type, currentCode, start, account]);
 
   const closeRow = (rowKey: string | number, rowMap: { [x: string]: { closeRow: () => void; }; }) => {
     if (rowMap[rowKey]) {
@@ -437,9 +503,35 @@ export default function TransactionsScreen({ navigation, route }: ScreenType) {
     }
   };
 
-  const deleteRow = (id: string) => {
-    deleteTransaction(id);
+  // 列表读的是本地库：只删服务端不够，本地行留着会在重载/对账后重新出现。
+  // 先等服务端删除成功，再清本地行（`deleteLocalTransaction` 只删 dirty = 0 的服务端镜像）。
+  const removeRow = async (id: string) => {
+    try {
+      await dispatch.transactions.deleteTransaction(id);
+    } catch {
+      // 服务端删除失败：本地行保持不动，错误已由 ErrorWidget 的 configuration error 通道提示。
+      return;
+    }
+
+    try {
+      const db = getDb();
+      const scopeId = await getCurrentScope(db);
+      await deleteLocalTransaction(db, scopeId, id);
+    } catch (localError) {
+      // 本地清理失败不阻断列表更新；错误走与表单一致的 reportError 通道。
+      dispatch.configuration
+        .reportError(localError instanceof Error ? localError : new Error(String(localError)))
+        .catch(() => {});
+    }
+
     setTransactions((prevState) => prevState.filter((item) => item.id !== id));
+  };
+
+  const deleteRow = (id: string) => {
+    // deleteAlert 已拦截离线，这里兜底一次，避免其他入口绕过。
+    guard(() => {
+      removeRow(id);
+    });
   };
 
   const goToDuplicate = (payload: { splits: TransactionSplitType[]; groupTitle: string; }) => navigation.dispatch(
@@ -456,7 +548,11 @@ export default function TransactionsScreen({ navigation, route }: ScreenType) {
     setCurrentCode('');
     setSearch('');
     setAccount('');
-    setStartDate(new Date(`${defaultStart}T12:00:00`));
+    setCategoryId(undefined);
+    setHasAnyCategory(undefined);
+    setStartDate(startOfCurrentQuarter());
+    searchInputRef.current = '';
+    searchBarRef.current?.setText('');
   };
 
   const transactionSections = useMemo(
@@ -488,31 +584,47 @@ export default function TransactionsScreen({ navigation, route }: ScreenType) {
       refreshControl={(
         <RefreshControl
           refreshing={false}
-          onRefresh={onLoad}
+          onRefresh={manualRefresh}
         />
       )}
       ListHeaderComponent={(
-        <AStackFlex row backgroundColor={colors.tileBackgroundColor} py={5}>
-          {(type !== '' || currentCode !== '' || account !== '') && (
+        <>
+          <SyncStatusBar />
+          {error && (
             <AView
               style={{
-                justifyContent: 'center',
-                alignItems: 'center',
-                width: 30,
-                height: 30,
-                marginHorizontal: 5,
+                backgroundColor: colors.tileBackgroundColor,
+                paddingHorizontal: 10,
+                paddingVertical: 8,
               }}
             >
-              <Ionicons onPress={resetFilters} name="close-circle" size={24} color={colors.text} />
+              <AText fontSize={12} color={colors.brandDanger}>
+                {translate('transaction_load_failed')}
+              </AText>
             </AView>
           )}
-          <AScrollView horizontal showsHorizontalScrollIndicator={false}>
-            <ADateFilterButton currentDate={start} selectDate={(date: Date) => setStartDate(date)} />
-            <AFilterButton filterType={translate('transaction_type_label')} selected={type} selectFilter={(selected: 'withdrawal' | 'deposit' | 'transfer') => setType(selected)} navigation={navigation} capitalize />
-            <AFilterButton filterType={translate('currency')} selected={currentCode} selectFilter={(selected) => setCurrentCode(selected)} navigation={navigation} />
-            <AFilterButton filterType={translate('home_accounts')} selected={account} selectFilter={(selected) => setAccount(selected)} navigation={navigation} />
-          </AScrollView>
-        </AStackFlex>
+          <AStackFlex row backgroundColor={colors.tileBackgroundColor} py={5}>
+            {(type !== '' || currentCode !== '' || account !== '') && (
+              <AView
+                style={{
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  width: 30,
+                  height: 30,
+                  marginHorizontal: 5,
+                }}
+              >
+                <Ionicons onPress={resetFilters} name="close-circle" size={24} color={colors.text} />
+              </AView>
+            )}
+            <AScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <ADateFilterButton currentDate={startDate} selectDate={(date: Date) => setStartDate(date)} />
+              <AFilterButton filterType={translate('transaction_type_label')} selected={type} selectFilter={(selected: 'withdrawal' | 'deposit' | 'transfer') => setType(selected)} navigation={navigation} capitalize />
+              <AFilterButton filterType={translate('currency')} selected={currentCode} selectFilter={(selected) => setCurrentCode(selected)} navigation={navigation} />
+              <AFilterButton filterType={translate('home_accounts')} selected={account} selectFilter={(selected) => setAccount(selected)} navigation={navigation} />
+            </AScrollView>
+          </AStackFlex>
+        </>
       )}
       initialNumToRender={15}
       keyExtractor={(item: TransactionType) => item.id}
@@ -547,7 +659,8 @@ export default function TransactionsScreen({ navigation, route }: ScreenType) {
               groupTitle: data.item.attributes.groupTitle || '',
             });
           }}
-          handleOnPressDelete={() => deleteAlert(data.item, rowMap, closeRow, deleteRow)}
+          handleOnPressDelete={() => deleteAlert(data.item, rowMap, closeRow, deleteRow, guard)}
+          online={online}
         />
       )}
       rightOpenValue={-90}
@@ -556,20 +669,37 @@ export default function TransactionsScreen({ navigation, route }: ScreenType) {
       onRightActionStatusChange={({
         key,
         isActivated,
-      }) => (isActivated ? deleteAlert(transactions.find((t) => t.id === key), [], closeRow, deleteRow) : null)}
+      }) => {
+        if (!isActivated) {
+          return null;
+        }
+        const transaction = transactions.find((t) => t.id === key);
+        return transaction ? deleteAlert(transaction, [], closeRow, deleteRow, guard) : null;
+      }}
       leftOpenValue={90}
       stopLeftSwipe={190}
       leftActivationValue={170}
       onLeftActionStatusChange={({
         key,
         isActivated,
-      }) => (isActivated ? goToDuplicate({
-        splits: resetTransactionsDates(transactions.find((t) => t.id === key).attributes.transactions),
-        groupTitle: transactions.find((t) => t.id === key).attributes.groupTitle || '',
-      }) : null)}
+      }) => {
+        if (!isActivated) {
+          return null;
+        }
+        const transaction = transactions.find((t) => t.id === key);
+        return transaction ? goToDuplicate({
+          splits: resetTransactionsDates(transaction.attributes.transactions),
+          groupTitle: transaction.attributes.groupTitle || '',
+        }) : null;
+      }}
       contentContainerStyle={{ paddingBottom: 100 }}
-      getItemLayout={(_, index: number) => ({ length: ITEM_HEIGHT + 1, offset: (ITEM_HEIGHT + 1) * index, index })}
-      ListFooterComponent={ListFooterComponent({ onLoadMore, initLoading: loading })}
+      ListFooterComponent={(
+        <ListFooterComponent
+          onLoadMore={onLoadMore}
+          loading={loading || loadingMore}
+          hasMore={nextOffset !== null}
+        />
+      )}
     />
   );
 }

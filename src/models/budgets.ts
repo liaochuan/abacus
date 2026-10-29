@@ -9,7 +9,7 @@ type BudgetSpentType = {
   currencyDecimalPlaces: number
 }
 
-type BudgetType = {
+export type BudgetType = {
   id: string
   attributes: {
     name: string

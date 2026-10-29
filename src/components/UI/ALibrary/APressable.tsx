@@ -10,6 +10,7 @@ type APressableType = {
   onPress: () => void
   onLongPress?: () => void
   flexDirection?: 'row' | 'column'
+  testID?: string
 }
 
 export default function APressable({
@@ -18,12 +19,14 @@ export default function APressable({
   disabled = false,
   flexDirection = 'row',
   style = null,
+  testID = null,
   children = null,
 }: APressableType) {
   const { colors } = useThemeColors();
 
   return (
     <Pressable
+      testID={testID}
       disabled={disabled}
       onPress={onPress}
       onLongPress={onLongPress}

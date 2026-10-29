@@ -9,12 +9,19 @@
     "ios": "expo run:ios",
     "lint": "eslint --config .eslintrc.json .",
     "lint-with-results": "eslint --config .eslintrc.json --format @microsoft/eslint-formatter-sarif --output-file eslint-results.sarif .",
-    "start": "expo start --dev-client"
+    "start": "expo start --dev-client",
+    "test": "jest",
+    "test:e2e": "detox test"
   },
   "jest": {
     "preset": "jest-expo",
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/e2e/",
+      "/\\.worktree/"
+    ],
     "transformIgnorePatterns": [
-      "node_modules/(?!((jest-)?react-native|victory|react-native-svg|react-clone-referenced-element|expo(nent)?|@expo(nent)?/.*|react-navigation|redux-persist|native-base(-shoutem-theme)|native-base))"
+      "node_modules/(?!((jest-)?react-native|@react-native(-community)?/|victory|react-native-svg|react-clone-referenced-element|expo(nent)?|@expo(nent)?/.*|react-navigation|redux-persist|native-base(-shoutem-theme)|native-base))"
     ]
   },
   "dependencies": {
@@ -22,6 +29,7 @@
     "@expo/vector-icons": "^15.0.2",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-native-community/datetimepicker": "8.4.4",
+    "@react-native-community/netinfo": "11.4.1",
     "@react-navigation/bottom-tabs": "6.5.14",
     "@react-navigation/native": "6.1.12",
     "@react-navigation/native-stack": "6.9.20",
@@ -37,6 +45,7 @@
     "expo-asset": "~12.0.9",
     "expo-auth-session": "~7.0.8",
     "expo-blur": "~15.0.7",
+    "expo-build-properties": "~1.0.10",
     "expo-clipboard": "~8.0.7",
     "expo-crypto": "~15.0.7",
     "expo-dev-client": "~6.0.13",
@@ -49,6 +58,7 @@
     "expo-localization": "~17.0.7",
     "expo-quick-actions": "^4.0.2",
     "expo-secure-store": "~15.0.7",
+    "expo-sqlite": "~16.0.10",
     "expo-status-bar": "~3.0.8",
     "expo-store-review": "~9.0.8",
     "expo-system-ui": "~6.0.7",
@@ -79,6 +89,7 @@
   },
   "devDependencies": {
     "@babel/core": "^7.24.0",
+    "@testing-library/react-native": "^14.1.0",
     "@types/jest": "^29.5.8",
     "@types/lodash": "^4.14.197",
     "@types/node": "^20.9.0",

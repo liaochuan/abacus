@@ -11,7 +11,7 @@ import { maxBy, minBy } from 'lodash';
 import { Line, Circle } from 'react-native-svg';
 import { AntDesign } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { useDispatch, useSelector } from 'react-redux';
+import { useSelector } from 'react-redux';
 import {
   Pressable,
   View,
@@ -24,7 +24,12 @@ import {
   AText, AView,
 } from '../UI/ALibrary';
 
-import { RootDispatch, RootState } from '../../store';
+import { RootState } from '../../store';
+import { blobKeys } from '../../db/keys';
+import { useBlob } from '../../db/useBlob';
+import { isOnline } from '../../lib/network';
+import type { AccountType } from '../../models/accounts';
+import type { AssetAccountType } from '../../models/firefly';
 import Loading from '../UI/Loading';
 import translate from '../../i18n/locale';
 import { useThemeColors } from '../../lib/common';
@@ -137,19 +142,18 @@ export default function AssetsHistoryChart() {
   const { colors } = useThemeColors();
   const start = useSelector((state: RootState) => state.firefly.rangeDetails.start);
   const end = useSelector((state: RootState) => state.firefly.rangeDetails.end);
-  const accountCharts = useSelector((state: RootState) => state.firefly?.accounts);
-  const accounts = useSelector((state: RootState) => state.accounts.accounts);
+  const displayAllAccounts = useSelector((state: RootState) => state.configuration.displayAllAccounts);
+  const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
+  const { data: accountsData } = useBlob<AccountType[]>(blobKeys.accounts(start, end, currentCode, false));
+  const { data: accountChartsData, stale, fetchedAt, error: accountChartsError } = useBlob<AssetAccountType[]>(blobKeys.chartAccounts(start, end, currentCode, displayAllAccounts));
+  const accountCharts = accountChartsData ?? [];
+  const loading = accountChartsData === null && isOnline() && !accountChartsError;
+  // 首次在线加载时 fetchedAt 仍为 null，此时不算「过期」，避免一进页面就提示。
+  const showStaleMarker = (stale && fetchedAt !== null) || !isOnline();
   const [hiddenAccounts, setHiddenAccounts] = useState<string[]>([]);
   useEffect(() => {
-    setHiddenAccounts(accounts.filter((accountConfig) => !accountConfig.display).map((accountConfig) => accountConfig.attributes.name));
-  }, [accounts]);
-  const loading = useSelector((state: RootState) => state.loading.effects.firefly.getAccountChart?.loading);
-  const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
-  const dispatch = useDispatch<RootDispatch>();
-
-  useEffect(() => {
-    dispatch.firefly.getAccountChart();
-  }, [accounts]);
+    setHiddenAccounts((accountsData ?? []).filter((accountConfig) => !accountConfig.display).map((accountConfig) => accountConfig.attributes.name));
+  }, [accountsData]);
 
   const getTickValues = useCallback(() => {
     const dateArray = [];
@@ -197,13 +201,15 @@ export default function AssetsHistoryChart() {
               <Pressable
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch();
-                  dispatch.firefly.getAccountChart();
                 }}
               >
                 <AntDesign name="reload" size={24} color={colors.text} />
               </Pressable>
             </AStackFlex>
           </AStackFlex>
+          {showStaleMarker && (
+            <AText px={10}>{translate('offline_data_stale')}</AText>
+          )}
           <View style={{ height: 80 }} />
           {loading && (
           <AStackFlex justifyContent="center">
@@ -320,5 +326,7 @@ export default function AssetsHistoryChart() {
     accountCharts,
     colors,
     hiddenAccounts,
+    showStaleMarker,
+    currentCode,
   ]);
 }

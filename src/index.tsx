@@ -18,6 +18,7 @@ import {
 import { store, persistor } from './store';
 import Routes from './routes';
 import Loading from './components/UI/Loading';
+import AppBootstrap from './db/AppBootstrap';
 import translate from './i18n/locale';
 
 export default function App() {
@@ -99,8 +100,10 @@ export default function App() {
         loading={<Loading />}
         persistor={persistor}
       >
-        <StatusBar />
-        <Routes />
+        <AppBootstrap>
+          <StatusBar />
+          <Routes />
+        </AppBootstrap>
       </PersistGate>
     </Provider>
   );

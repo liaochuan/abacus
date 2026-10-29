@@ -25,7 +25,8 @@ export interface ScreenType {
       forceRefresh?: boolean | undefined;
       noRedirect?: boolean;
       filterType?: string;
-      transactionSearch?: string;
+      categoryId?: string;
+      hasAnyCategory?: boolean;
       startDate?: Date;
       selectFilter?: (filter: string) => void;
     }

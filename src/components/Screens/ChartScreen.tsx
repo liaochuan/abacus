@@ -1,16 +1,14 @@
-import React, { useCallback, useMemo, useRef } from 'react';
+import React, { useMemo, useRef } from 'react';
 import { Animated, View } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
-import { useDispatch, useSelector } from 'react-redux';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import PagerView, { PagerViewOnPageScrollEventData } from 'react-native-pager-view';
 import { Entypo, Feather } from '@expo/vector-icons';
 
-import { RootDispatch, RootState } from '../../store';
 import { useThemeColors } from '../../lib/common';
 import AssetsHistoryChart from '../Charts/AssetsHistoryChart';
 import BalanceHistoryChart from '../Charts/BalanceHistoryChart';
 import Pagination from '../UI/Pagination';
+import SyncStatusBar from '../UI/SyncStatusBar';
 import { AStack } from '../UI/ALibrary';
 
 const AnimatedPagerView = Animated.createAnimatedComponent(PagerView);
@@ -18,41 +16,14 @@ const AnimatedPagerView = Animated.createAnimatedComponent(PagerView);
 export default function ChartScreen() {
   const { colors } = useThemeColors();
   const safeAreaInsets = useSafeAreaInsets();
-  const start = useSelector((state: RootState) => state.firefly.rangeDetails.start);
-  const end = useSelector((state: RootState) => state.firefly.rangeDetails.end);
-  const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
-  const prevFiltersRef = useRef<string>();
-  const viewPagerRef = useRef<PagerView>();
+  const viewPagerRef = useRef<PagerView>(null);
   const scrollOffsetAnimatedValue = React.useRef(new Animated.Value(0)).current;
   const positionAnimatedValue = React.useRef(new Animated.Value(0)).current;
-  const dispatch = useDispatch<RootDispatch>();
 
   const renderIcons = [
     <Entypo key="line-graph" name="line-graph" size={20} color={colors.text} />,
     <Feather key="bar-chart-2" name="bar-chart-2" size={20} color={colors.text} />,
   ];
-
-  useFocusEffect(
-    useCallback(() => {
-      let isActive = true;
-
-      const fetchData = () => {
-        if (isActive) {
-          dispatch.firefly.getAccountChart();
-          dispatch.firefly.getBalanceChart();
-        }
-      };
-
-      if (prevFiltersRef.current !== `${start}-${end}-${currentCode}`) {
-        fetchData();
-        prevFiltersRef.current = `${start}-${end}-${currentCode}`;
-      }
-
-      return () => {
-        isActive = false;
-      };
-    }, [start, end, currentCode]),
-  );
 
   return useMemo(() => (
     <View
@@ -63,6 +34,7 @@ export default function ChartScreen() {
         justifyContent: 'center',
       }}
     >
+      <SyncStatusBar />
       <AStack px={5} py={5}>
         <Pagination
           renderIcons={renderIcons}
