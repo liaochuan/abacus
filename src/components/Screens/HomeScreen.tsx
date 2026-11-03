@@ -10,7 +10,6 @@ import {
   useScrollToTop,
   useNavigation,
 } from '@react-navigation/native';
-import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   RefreshControl,
@@ -53,7 +52,7 @@ import DisplayAllAccountsSwitch from '../UI/DisplayAllAccountsSwitch';
 import IncomeExpenseBar from '../UI/IncomeExpenseBar';
 import ErrorBoundary from '../UI/ErrorBoundary';
 
-const EXTRA_SCROLL_PADDING = 120;
+const EXTRA_SCROLL_PADDING = 24;
 
 // 下拉刷新：先发起一轮后台同步（fire-and-forget，不阻塞刷新动画），
 // 同时照旧刷新各视图的展示数据（在线时仍走 Redux 的接口调用）。
@@ -75,7 +74,6 @@ const AnimatedPagerView = Animated.createAnimatedComponent(PagerView);
 
 function AssetsAccounts() {
   const { colors } = useThemeColors();
-  const tabBarHeight = useBottomTabBarHeight();
   const start = useSelector((state: RootState) => state.firefly.rangeDetails.start);
   const end = useSelector((state: RootState) => state.firefly.rangeDetails.end);
   const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
@@ -119,7 +117,7 @@ function AssetsAccounts() {
   return (
     <AScrollView
       showsVerticalScrollIndicator={false}
-      style={{ paddingBottom: tabBarHeight + EXTRA_SCROLL_PADDING }}
+      style={{ paddingBottom: EXTRA_SCROLL_PADDING }}
       refreshControl={(
         <RefreshControl
           refreshing={false}
@@ -247,7 +245,6 @@ function AssetsAccounts() {
 
 function InsightCategories() {
   const { colors } = useThemeColors();
-  const tabBarHeight = useBottomTabBarHeight();
   const startDate = useSelector((state: RootState) => state.firefly.rangeDetails.start);
   const end = useSelector((state: RootState) => state.firefly.rangeDetails.end);
   const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
@@ -286,7 +283,7 @@ function InsightCategories() {
   return (
     <AScrollView
       showsVerticalScrollIndicator={false}
-      style={{ paddingBottom: tabBarHeight + EXTRA_SCROLL_PADDING }}
+      style={{ paddingBottom: EXTRA_SCROLL_PADDING }}
       refreshControl={(
         <RefreshControl
           refreshing={false}
@@ -384,7 +381,6 @@ function InsightCategories() {
 
 function InsightBudgets() {
   const { colors } = useThemeColors();
-  const tabBarHeight = useBottomTabBarHeight();
   const start = useSelector((state: RootState) => state.firefly.rangeDetails.start);
   const end = useSelector((state: RootState) => state.firefly.rangeDetails.end);
   const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
@@ -396,7 +392,7 @@ function InsightBudgets() {
   return (
     <AScrollView
       showsVerticalScrollIndicator={false}
-      style={{ paddingBottom: tabBarHeight + EXTRA_SCROLL_PADDING }}
+      style={{ paddingBottom: EXTRA_SCROLL_PADDING }}
       refreshControl={(
         <RefreshControl
           refreshing={false}
@@ -473,7 +469,6 @@ function formatDate(date) {
 
 function Bills() {
   const { colors } = useThemeColors();
-  const tabBarHeight = useBottomTabBarHeight();
   const { data: billsData, error: billsError } = useBlob<BillType[]>(blobKeys.bills());
   const bills = billsData ?? [];
   const loading = billsData === null && isOnline() && !billsError;
@@ -482,7 +477,7 @@ function Bills() {
   return (
     <AScrollView
       showsVerticalScrollIndicator={false}
-      style={{ paddingBottom: tabBarHeight + EXTRA_SCROLL_PADDING }}
+      style={{ paddingBottom: EXTRA_SCROLL_PADDING }}
       refreshControl={(
         <RefreshControl
           refreshing={loading}
@@ -566,7 +561,6 @@ function Bills() {
 
 function PiggyBanks() {
   const { colors } = useThemeColors();
-  const tabBarHeight = useBottomTabBarHeight();
   const { data: piggyBanksData, error: piggyBanksError } = useBlob<PiggyBank[]>(blobKeys.piggyBanks());
   const piggyBanks = piggyBanksData ?? [];
   const loading = piggyBanksData === null && isOnline() && !piggyBanksError;
@@ -575,7 +569,7 @@ function PiggyBanks() {
   return (
     <AScrollView
       showsVerticalScrollIndicator={false}
-      style={{ paddingBottom: tabBarHeight + EXTRA_SCROLL_PADDING }}
+      style={{ paddingBottom: EXTRA_SCROLL_PADDING }}
       refreshControl={(
         <RefreshControl
           refreshing={false}
@@ -849,7 +843,7 @@ export default function HomeScreen() {
               paddingTop: 5,
               position: 'absolute',
               top: -55,
-              height: '150%',
+              bottom: 0,
               right: 0,
               left: 0,
             }}
