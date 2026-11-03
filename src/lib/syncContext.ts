@@ -1,7 +1,11 @@
 import axios from 'axios';
 
 import type { SyncContext } from '../db/sync';
-import { scopeIdFor } from '../db/scope';
+import { readCachedCurrentCode } from '../db/cachedCurrencies';
+import { getDb } from '../db/instance';
+import { getCurrentScope, scopeIdFor } from '../db/scope';
+import { classifySyncError } from '../db/syncErrors';
+import { buildCurrenciesBlob } from '../db/syncBlobs';
 import { computePullWindow } from '../db/syncWindows';
 import type { TCredential } from '../types/credential';
 import { store } from '../store';
@@ -87,6 +91,84 @@ async function refreshAccessToken(credential: Credential): Promise<string> {
   return fresh.accessToken;
 }
 
+// 拉取默认币种：复用同步自己的 http（带 30 秒超时），Authorization 由 activeContext
+// 拦截器注入；不走全局 axios 默认头——冷启动不保证存在，且可能是上一个账号的 token。
+async function fetchDefaultCurrency(backendURL: string): Promise<string> {
+  const response = await http.get(`${backendURL}/api/v1/currencies`);
+  return buildCurrenciesBlob(response?.data, '').currentCode;
+}
+
+async function readCachedCurrencyCode(scopeId: string): Promise<string | null> {
+  try {
+    return await readCachedCurrentCode(getDb(), scopeId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 取得本轮同步可用的币种与最终 token。
+ *
+ * - 已有值（persist / getCurrencies / cachedCurrentCode）直接用；
+ * - 为空时先用本轮账号自己的 token 拉一次默认币种，token 过期则刷新后重试；
+ * - 刷新/重试失败、网络或服务端故障、服务端没有默认币种时，回落当前 scope 的
+ *   currencies 缓存，至少让 outbox 推送与旧 blob 继续可用；都没有才抛错，让状态条
+ *   显示失败而不是静默停在 idle。
+ *
+ * 返回值里的 accessToken 是刷新后的最新 token：调用方必须用它组装 SyncContext，
+ * 否则刷新结果会被旧 credential 覆盖，runSync 第一发请求又要再刷新一次。
+ *
+ * 本函数自身不写 Redux；调用方在确认 scope 未变后，负责把空币种补回
+ * `currencies.currentCode`，避免首页按空键读数据。
+ */
+async function resolveCurrencyCode(
+  currentCode: string,
+  backendURL: string,
+  scopeId: string,
+  credential: Credential,
+): Promise<{ currencyCode: string; accessToken: string }> {
+  if (currentCode) {
+    return { currencyCode: currentCode, accessToken: credential.accessToken };
+  }
+
+  // activeContext 只影响本文件创建的 http 实例，请求结束后的 runSync 会再次覆盖它。
+  // 用局部引用读取刷新后的 token，避免 activeContext 被后续流程替换后拿错。
+  const tokenHolder: TokenHolder = { accessToken: credential.accessToken };
+  activeContext = tokenHolder;
+
+  let fetched = '';
+  let probeError: unknown = null;
+  try {
+    fetched = await fetchDefaultCurrency(backendURL);
+  } catch (error) {
+    if (classifySyncError(error) === 'auth') {
+      // 与 runSync 一致：token 过期先刷新一次再重试。
+      // 刷新或重试的失败都走下面的缓存兜底，不能绕过 readCachedCurrencyCode。
+      try {
+        await refreshAccessToken(credential);
+        fetched = await fetchDefaultCurrency(backendURL);
+      } catch (retryError) {
+        probeError = retryError;
+      }
+    } else {
+      probeError = error;
+    }
+  }
+
+  if (fetched) {
+    return { currencyCode: fetched, accessToken: tokenHolder.accessToken };
+  }
+
+  const cached = await readCachedCurrencyCode(scopeId);
+  if (cached) {
+    return { currencyCode: cached, accessToken: tokenHolder.accessToken };
+  }
+  if (probeError) {
+    throw probeError;
+  }
+  throw new Error('sync currency unavailable');
+}
+
 /**
  * 组装一轮同步的上下文。
  *
@@ -95,6 +177,8 @@ async function refreshAccessToken(credential: Credential): Promise<string> {
  *
  * 返回 null 表示「没有可同步的账号」：scopeId 为空、没有匹配该 scope 的 credential，
  * 或 credential 尚未拿到 accessToken。调用方应回到 idle，而不是报错。
+ * 币种无法取得时抛错（不是返回 null）：此时有账号但不能安全地写 blobs，必须让状态条
+ * 显示失败，不能伪装成「已同步」。
  */
 export async function buildSyncContext(scopeId: string): Promise<SyncContext | null> {
   if (!scopeId) {
@@ -109,19 +193,45 @@ export async function buildSyncContext(scopeId: string): Promise<SyncContext | n
 
   const state = store.getState();
   const configuration = state.configuration;
-  // rangeDetails 正常情况下由 Redux 持久化提供；缺失时退回 pull 的增量窗口，
-  // 避免拼出 `start=:end=` 这种空区间 URL。
+  // currentCode 的来源不止 HomeScreen：Redux persist、登录后的 getCurrencies、
+  // 以及离线兜底的 cachedCurrentCode 都可能写入。首次安装或刚登录时仍可能为空串，
+  // 用空币种组装上下文会把 blobs 写到 `accounts:start:end::asset` 这类键上，
+  // 首页按真实币种读永远读不到。这里在组装前自行补齐；补到值且 scope 未变时回写 Redux。
+  const backendURL = configuration.backendURL || credential.backendURL;
+  const resolved = await resolveCurrencyCode(
+    state.currencies?.currentCode ?? '',
+    backendURL,
+    scopeId,
+    credential,
+  );
+  const { currencyCode } = resolved;
+
+  if (!state.currencies?.currentCode) {
+    // HomeScreen 的 getCurrencies 可能刚失败，Redux 仍是空串；把本轮探测或缓存兜底
+    // 得到的币种写回，避免 blobs 已写好但首页仍按空币种键读。只在 scope 未变时写，
+    // 防止切号窗口把新账号的币种写到别的分区显示上。
+    try {
+      const db = getDb();
+      if (await getCurrentScope(db) === scopeId) {
+        store.dispatch.currencies.setCurrentCode(currencyCode);
+      }
+    } catch {
+      // 回写失败不影响本轮同步。
+    }
+  }
+  // rangeDetails 来自 Redux（firefly 不在 persist 白名单，冷启动时是 INITIAL_STATE 的
+  // 当前季度）；缺失时退回 pull 的增量窗口，避免拼出 `start=:end=` 这种空区间 URL。
   const fallback = computePullWindow(new Date(), false);
   const start = state.firefly.rangeDetails?.start || fallback.start;
   const end = state.firefly.rangeDetails?.end || fallback.end;
 
   const ctx: SyncContext = {
     // backendURL 以 Redux 为准（用户可在设置里切换），credential 里的只是兜底。
-    backendURL: configuration.backendURL || credential.backendURL,
-    accessToken: credential.accessToken,
+    backendURL,
+    accessToken: resolved.accessToken,
     http,
     range: { start, end },
-    currencyCode: state.currencies.currentCode,
+    currencyCode,
     displayAllAccounts: configuration.displayAllAccounts,
     apiVersion: configuration.apiVersion,
     // 图表品牌色只是展示细节，blob 层缺省时用默认橙色。

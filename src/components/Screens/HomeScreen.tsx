@@ -2,13 +2,11 @@ import React, {
   useEffect,
   useMemo,
   useRef,
-  useCallback,
   useState,
 } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import {
   CommonActions,
-  useFocusEffect,
   useScrollToTop,
   useNavigation,
 } from '@react-navigation/native';
@@ -762,6 +760,7 @@ export default function HomeScreen() {
   const start = useSelector((state: RootState) => state.firefly.rangeDetails.start);
   const end = useSelector((state: RootState) => state.firefly.rangeDetails.end);
   const currentCode = useSelector((state: RootState) => state.currencies.currentCode);
+  const displayAllAccounts = useSelector((state: RootState) => state.configuration.displayAllAccounts);
   const dispatch = useDispatch<RootDispatch>();
   const selectedTheme = useSelector((state: RootState) => state.configuration.selectedTheme || 'gradientOrange');
   const lightSelectedColor = colors[`${selectedTheme}Light`] || colors.gradientOrangeLight;
@@ -801,14 +800,21 @@ export default function HomeScreen() {
 
   useScrollToTop(scrollRef);
 
-  useFocusEffect(
-    useCallback(() => {
-      // 进入首页触发一轮同步：区间/币种变化后重新进入也会补拉。
-      // fire-and-forget：同步失败只影响状态条，页面继续显示本地缓存；
-      // 并发与重复触发由 requestSync 的单飞锁吸收。
-      requestSync('manual').catch(() => {});
-    }, [start, end, currentCode]),
-  );
+  // 区间 / 币种变化后补拉对应的 blob 键（第一次渲染交给 SyncTriggers 或登录触发）。
+  // 只在键真的变化时同步：点底栏切回首页不会重挂载，也不会触发这里。
+  const rangeKeyRef = useRef('');
+  useEffect(() => {
+    const key = `${start}:${end}:${currentCode}:${displayAllAccounts}`;
+    if (rangeKeyRef.current === '') {
+      rangeKeyRef.current = key;
+      return;
+    }
+    if (rangeKeyRef.current === key) {
+      return;
+    }
+    rangeKeyRef.current = key;
+    requestSync('manual').catch(() => {});
+  }, [start, end, currentCode, displayAllAccounts]);
 
   const scrollOffsetAnimatedValue = React.useRef(new Animated.Value(0)).current;
   const positionAnimatedValue = React.useRef(new Animated.Value(0)).current;

@@ -26,15 +26,14 @@ export type SyncSchedule = {
 };
 
 const PENDING_INTERVAL_MS = 60_000;
-const IDLE_INTERVAL_MS = 600_000;
 
-// 下一轮定时同步的间隔（毫秒）。有 pending 时 60 秒——本地改动尽快推上去；
-// 队列清空后回到 10 分钟，避免空转。
-// lastSyncedAt 与 now 目前不改变间隔，保留在签名里，便于调用方统一计算、
-// 也为后续「久未成功则加速」等策略留出位置而不必改所有触发点。
+// 下一轮定时同步的间隔（毫秒）。只有 outbox 有积压时才排期（60 秒重试）；
+// 队列清空后返回 null，调度层据此停掉定时器，避免空闲期每 10 分钟空转一次请求。
+// 冷启动、前台恢复与下拉刷新由各自的触发点负责，不依赖这个定时器。
+// lastSyncedAt 与 now 目前不改变间隔，保留在签名里，便于调用方统一计算。
 // eslint-disable-next-line no-unused-vars, @typescript-eslint/no-unused-vars
-export function nextSyncDelay({ pending }: SyncSchedule, now: Date): number {
-  return pending > 0 ? PENDING_INTERVAL_MS : IDLE_INTERVAL_MS;
+export function nextSyncDelay({ pending }: SyncSchedule, now: Date): number | null {
+  return pending > 0 ? PENDING_INTERVAL_MS : null;
 }
 
 type SyncListener = () => void;

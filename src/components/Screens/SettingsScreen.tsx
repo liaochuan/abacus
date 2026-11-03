@@ -166,7 +166,8 @@ export default function SettingsScreen({ navigation }: ScreenType) {
       startSyncTimer();
       return;
     }
-    // 成功路径同样要恢复定时器：scope 已清空，下一轮排期会按默认间隔继续。
+    // 成功路径同样要恢复定时器：scope 已清空，排期会因没有账号而停表；
+    // 重新登录后由进入 dashboard 的触发接管。
     startSyncTimer();
     await goToCredentials();
   };

@@ -20,6 +20,7 @@ import {
 } from '../../lib/oauth';
 import { classifyAuthError } from '../../lib/authError';
 import { isOnline } from '../../lib/network';
+import { requestSyncIfDue } from '../../lib/syncScheduler';
 import { getDb } from '../../db/instance';
 import { deleteScope, hasLocalData } from '../../db/repository';
 import { getCurrentScope, scopeIdFor, setCurrentScope } from '../../db/scope';
@@ -105,6 +106,9 @@ export default function CredentialsScreen({ navigation, route }: ScreenType) {
     const enterDashboard = () => {
       dispatch.configuration.setBackendURL(currentBackendURL);
       dispatch.currencies.setCurrentCode('');
+      // 登录 / 切换账号后进入 dashboard：新 scope 的 last_synced_at 通常为空，会立即同步；
+      // 冷启动若 SyncTriggers 刚同步过（不足 5 分钟），这里直接跳过，避免重复跑一轮。
+      requestSyncIfDue('startup').catch(() => {});
       goToDashboard();
     };
 
