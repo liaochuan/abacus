@@ -41,6 +41,7 @@ import ColorSelectionScreen from '../components/Screens/ColorSelectionScreen';
 
 // UI components
 import NavigationHeader from '../components/UI/NavigationHeader';
+import SyncStatusIcon from '../components/UI/SyncStatusIcon';
 import {
   AIconButton,
   AStack,
@@ -139,6 +140,8 @@ function TransactionsStack() {
         initialParams={{ forceRefresh: false }}
         options={{
           headerTitle: translate('navigation_transactions_tab'),
+          // 与首页/图表页保持一致：同步状态放在顶栏右侧，列表头不再占一行。
+          headerRight: () => <SyncStatusIcon />,
           headerLargeTitle: true,
           headerTransparent: Platform.select({ ios: true, android: false }),
           headerStyle: Platform.select({ android: { backgroundColor: colors.tileBackgroundColor } }),
@@ -243,7 +246,6 @@ function Home() {
           tabBarStyle: {
             backgroundColor: Platform.select({ ios: 'transparent', android: colors.tileBackgroundColor }),
             borderTopWidth: 0,
-            marginTop: 10,
             elevation: 0,
           },
           tabBarLabelStyle: {

@@ -42,6 +42,19 @@ const syncStatusKeys = [
   'sync_status_problems',
   // 同步失败时状态条不能继续显示「已同步」（见 statusBarText 的优先级）。
   'sync_status_error',
+  // 顶栏图标的 tooltip 与可翻译的失败原因。
+  'sync_tooltip_last_synced',
+  'sync_tooltip_never_synced',
+  'sync_tooltip_open',
+  'sync_tooltip_sync_now',
+  'sync_tooltip_issues',
+  'sync_tooltip_reason',
+  'sync_error_reason_network',
+  'sync_error_reason_auth',
+  'sync_error_reason_gone',
+  'sync_error_reason_invalid',
+  'sync_error_reason_server',
+  'sync_error_reason_other',
 ] as const;
 
 test('全部 15 种语言都存在状态条词条', () => {
@@ -69,4 +82,12 @@ test('en-US / zh-CN 的状态条文案带计数占位符', () => {
 test('同步失败的文案', () => {
   expect(enUS.sync_status_error).toBe('Sync error');
   expect(zhCN.sync_status_error).toBe('同步出错');
+});
+
+test('tooltip 与失败原因文案', () => {
+  expect(zhCN.sync_tooltip_sync_now).toBe('立即同步');
+  expect(enUS.sync_tooltip_sync_now).toBe('Sync now');
+  expect(zhCN.sync_tooltip_never_synced).toBe('尚未成功同步');
+  expect(zhCN.sync_error_reason_network).toBe('网络不可用');
+  expect(enUS.sync_error_reason_network).toBe('Network unavailable');
 });

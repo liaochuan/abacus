@@ -7,6 +7,7 @@ import { getDb } from '../db/instance';
 import { getMeta } from '../db/repository';
 import { getCurrentScope } from '../db/scope';
 import { AuthExpiredError, runSync } from '../db/sync';
+import { pullBlobs } from '../db/syncBlobs';
 import { classifySyncError } from '../db/syncErrors';
 import {
   emitSyncChanged,
@@ -19,7 +20,8 @@ import { buildSyncContext } from './syncContext';
 import { isOnline } from './network';
 import { isStale } from '../db/staleness';
 
-// 同步调度层：所有触发点（启动、前台、网络恢复、定时器、手动、保存后）都只调 requestSync。
+// 同步调度层：所有触发点（启动、前台、网络恢复、定时器、手动、保存后）都只调 requestSync；
+// 只换展示维度（区间 / 币种 / 账户过滤）时调 requestBlobSync，只补缓存、不跑整轮。
 // 这里负责「什么时候能跑」与「跑完把状态写成什么」，不负责业务流水线（在 db/sync.ts）。
 //
 // 三条硬约束：
@@ -54,6 +56,10 @@ let pendingReason: SyncReason | null = null;
 // 当前正在跑的那一轮属于哪个 scope。用于识别「同步进行中切号」的触发；
 // 同账号的普通重复触发仍丢弃，但 manual 会排队补跑（见 requestSync）。
 let runningScopeId: string | null = null;
+
+// 只补 blob 的请求在上一轮结束后补跑一次。与 pendingReason 分开记：
+// 它不跑 push / pull 交易，只是把新维度（区间、币种、账户过滤）对应的缓存拉下来。
+let pendingBlobSync = false;
 
 // 状态条要的计数：pending 是待推送的 outbox 行数，problems 是「需处理」项
 // （failed 的 outbox 行 + 未确认的 notices）。两条都是带 scope 过滤的聚合查询，
@@ -193,11 +199,18 @@ export async function requestSync(reason: SyncReason): Promise<void> {
       // 失败前如果账号已被切走，同样要替新 scope 补跑一次。
       await noteScopeChange(db, scopeId);
       const snapshot = await readSnapshotSafe(db, scopeId);
-      if (classifySyncError(error) === 'network') {
+      // 分类只算一次：既用于决定 offline / error，也作为 error.reason 供 UI 翻译。
+      const kind = classifySyncError(error);
+      if (kind === 'network') {
         // 拉取途中断网：语义是「这轮因为离线没跑成」，状态条显示离线而不是报错。
         setSyncState({ kind: 'offline', ...snapshot });
       } else {
-        setSyncState({ kind: 'error', message: errorMessage(error), ...snapshot });
+        setSyncState({
+          kind: 'error',
+          reason: error instanceof AuthExpiredError ? 'auth' : kind,
+          message: errorMessage(error),
+          ...snapshot,
+        });
       }
     } finally {
       emitSyncChanged();
@@ -214,6 +227,86 @@ export async function requestSync(reason: SyncReason): Promise<void> {
     pendingReason = null;
     // 不 await：补跑仍走单飞锁，触发点本身不需要等它。
     requestSync(nextReason).catch(() => {});
+  }
+
+  if (pendingBlobSync) {
+    pendingBlobSync = false;
+    requestBlobSync().catch(() => {});
+  }
+}
+
+/**
+ * 只补 blob 的一轮：首页区间 / 币种 /「全部账户」变化后，把新维度对应的
+ * 账户、图表等缓存拉下来。
+ *
+ * 与 requestSync 的区别：不 push outbox、不 pull 交易、不推进 last_synced_at，
+ * 也不碰 connection_alert——它只解决「换了个维度，本地没有这份缓存」。
+ * 走同一个单飞锁，避免与整轮同步并发写同一批 blob；抢不到锁时排队补跑。
+ */
+export async function requestBlobSync(): Promise<void> {
+  if (!isOnline()) {
+    // 离线时保持现状：图标本身已经由 NetInfo 显示成离线，不需要再写一次状态。
+    return;
+  }
+  if (isSyncRunning()) {
+    // 正有同步在跑：不并发写同一批 blob，等它结束后补一次。
+    pendingBlobSync = true;
+    return;
+  }
+
+  let db: Db;
+  try {
+    db = getDb();
+  } catch {
+    return;
+  }
+
+  let ranHere = false;
+  let scopeId = '';
+
+  await runExclusively(async () => {
+    ranHere = true;
+    try {
+      scopeId = await getCurrentScope(db);
+      if (!scopeId) {
+        return;
+      }
+      const ctx = await buildSyncContext(scopeId);
+      if (ctx === null) {
+        return;
+      }
+      runningScopeId = scopeId;
+      setSyncState({ kind: 'syncing', phase: 'pull' });
+      await pullBlobs(db, scopeId, ctx);
+      setSyncState({ kind: 'idle', ...(await readSnapshotSafe(db, scopeId)) });
+    } catch (error) {
+      const kind = classifySyncError(error);
+      const snapshot = await readSnapshotSafe(db, scopeId);
+      if (kind === 'network') {
+        setSyncState({ kind: 'offline', ...snapshot });
+      } else {
+        setSyncState({
+          kind: 'error',
+          reason: error instanceof AuthExpiredError ? 'auth' : kind,
+          message: errorMessage(error),
+          ...snapshot,
+        });
+      }
+    } finally {
+      emitSyncChanged();
+      runningScopeId = null;
+    }
+  });
+
+  if (!ranHere) {
+    // 没抢到锁：说明正有别的同步在跑，等它结束后补一次。
+    pendingBlobSync = true;
+    return;
+  }
+
+  if (pendingBlobSync) {
+    pendingBlobSync = false;
+    requestBlobSync().catch(() => {});
   }
 }
 

@@ -19,6 +19,7 @@ import {
 } from './ALibrary';
 import { RootDispatch, RootState } from '../../store';
 import { useThemeColors } from '../../lib/common';
+import SyncStatusIcon from './SyncStatusIcon';
 
 export default function NavigationHeader({ navigation }): React.ReactNode {
   const { colors } = useThemeColors();
@@ -92,6 +93,8 @@ export default function NavigationHeader({ navigation }): React.ReactNode {
         </AStack>
         ) : null}
       </AStack>
+
+      <SyncStatusIcon />
 
       <TouchableOpacity
         style={{

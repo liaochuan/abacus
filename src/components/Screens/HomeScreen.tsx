@@ -32,7 +32,7 @@ import { cachedCurrentCode } from '../../db/cachedCurrencies';
 import { blobKeys } from '../../db/keys';
 import { useBlob } from '../../db/useBlob';
 import { isOnline } from '../../lib/network';
-import { requestSync } from '../../lib/syncScheduler';
+import { requestBlobSync, requestSync } from '../../lib/syncScheduler';
 import type { AccountType } from '../../models/accounts';
 import type { BillType } from '../../models/bills';
 import type { BudgetType } from '../../models/budgets';
@@ -41,7 +41,6 @@ import type { HomeDisplayType } from '../../models/firefly';
 import type { PiggyBank } from '../../models/piggyBanks';
 
 import Pagination from '../UI/Pagination';
-import SyncStatusBar from '../UI/SyncStatusBar';
 import {
   AScrollView,
   AStack,
@@ -800,8 +799,9 @@ export default function HomeScreen() {
 
   useScrollToTop(scrollRef);
 
-  // 区间 / 币种变化后补拉对应的 blob 键（第一次渲染交给 SyncTriggers 或登录触发）。
-  // 只在键真的变化时同步：点底栏切回首页不会重挂载，也不会触发这里。
+  // 区间 / 币种 / 账户过滤变化后补拉对应的 blob 键（第一次渲染交给 SyncTriggers 或登录触发）。
+  // 这类变化只影响图表与账户缓存，不需要 push outbox 或重拉交易，所以走只拉 blob 的入口。
+  // 只在键真的变化时触发：点底栏切回首页不会重挂载，也不会触发这里。
   const rangeKeyRef = useRef('');
   useEffect(() => {
     const key = `${start}:${end}:${currentCode}:${displayAllAccounts}`;
@@ -813,7 +813,7 @@ export default function HomeScreen() {
       return;
     }
     rangeKeyRef.current = key;
-    requestSync('manual').catch(() => {});
+    requestBlobSync().catch(() => {});
   }, [start, end, currentCode, displayAllAccounts]);
 
   const scrollOffsetAnimatedValue = React.useRef(new Animated.Value(0)).current;
@@ -826,9 +826,8 @@ export default function HomeScreen() {
           colors={gradientColors}
           start={{ x: 0, y: 1 }}
           end={{ x: 1, y: 0 }}
-          style={{ minHeight: 250 + safeAreaInsets.top + 24 + 45, paddingTop: safeAreaInsets.top + 45 }}
+          style={{ minHeight: 250 + safeAreaInsets.top + 45, paddingTop: safeAreaInsets.top + 45 }}
         >
-          <SyncStatusBar />
           <AStackFlex>
             <NetWorth />
             <Pagination

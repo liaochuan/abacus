@@ -5,17 +5,27 @@
 // 为什么用模块级变量而不是 Context：同步是全局的（一个账号一个 scope），
 // 触发来源分散在启动、前台、网络恢复、定时器与手动按钮，没有共同的 React 祖先可挂。
 
+import type { SyncErrorKind } from './syncErrors';
+
 /**
  * 状态机（spec §7.7）。字段含义：
  * - syncing 只有阶段，不带计数——同步中的计数由订阅方从库里读；
  * - offline 与 idle 同形，区别只在「最后一轮是否因为离线没跑成」；
- * - error 带一条固定的、无内容的短消息（不得包含 token、账户名或备注）。
+ * - error 带一条固定的、无内容的短消息（不得包含 token、账户名或备注），
+ *   reason 是 message 已分类后的枚举，供 UI 展示可翻译的失败原因。
  */
 export type SyncState =
   | { kind: 'idle'; lastSyncedAt: string | null; pending: number; problems: number }
   | { kind: 'syncing'; phase: 'push' | 'pull' }
   | { kind: 'offline'; lastSyncedAt: string | null; pending: number; problems: number }
-  | { kind: 'error'; message: string; lastSyncedAt: string | null; pending: number; problems: number };
+  | {
+    kind: 'error';
+    reason: SyncErrorKind;
+    message: string;
+    lastSyncedAt: string | null;
+    pending: number;
+    problems: number;
+  };
 
 // 定时同步的输入快照（只读，由调度层在每次排期前查一次库）。
 export type SyncSchedule = {

@@ -45,7 +45,6 @@ import {
 import AFilterButton from '../UI/ALibrary/AFilterButton';
 import AButton from '../UI/ALibrary/AButton';
 import ADateFilterButton from '../UI/ALibrary/ADateFilterButton';
-import SyncStatusBar from '../UI/SyncStatusBar';
 
 const ITEM_HEIGHT = 90;
 // 本地分页每页条数。本地库没有廉价 COUNT，total 传 Infinity，翻页靠短页/空页结束。
@@ -589,7 +588,6 @@ export default function TransactionsScreen({ navigation, route }: ScreenType) {
       )}
       ListHeaderComponent={(
         <>
-          <SyncStatusBar />
           {error && (
             <AView
               style={{

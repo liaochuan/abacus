@@ -330,6 +330,7 @@ test('上一轮同步失败（error）时即使在线也展示告警', async () 
   listOpenNoticesMock.mockResolvedValue([]);
   getSyncStateMock.mockReturnValue({
     kind: 'error',
+    reason: 'auth',
     message: 'sync failed',
     lastSyncedAt: null,
     pending: 0,

@@ -8,7 +8,6 @@ import { useThemeColors } from '../../lib/common';
 import AssetsHistoryChart from '../Charts/AssetsHistoryChart';
 import BalanceHistoryChart from '../Charts/BalanceHistoryChart';
 import Pagination from '../UI/Pagination';
-import SyncStatusBar from '../UI/SyncStatusBar';
 import { AStack } from '../UI/ALibrary';
 
 const AnimatedPagerView = Animated.createAnimatedComponent(PagerView);
@@ -34,7 +33,6 @@ export default function ChartScreen() {
         justifyContent: 'center',
       }}
     >
-      <SyncStatusBar />
       <AStack px={5} py={5}>
         <Pagination
           renderIcons={renderIcons}
