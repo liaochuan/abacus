@@ -55,8 +55,6 @@ const OFFLINE_KEYS = [
   'sync_error_auth',
   'sync_error_server',
   'sync_error_incomplete',
-  'transaction_saved_pending',
-  'transaction_saved_synced',
   'transaction_needs_fix',
   'transaction_gone_on_server',
   'transaction_waiting_network',

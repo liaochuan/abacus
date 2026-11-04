@@ -144,8 +144,6 @@ export default {
   offline_no_accounts: 'No cached accounts — connect to sync',
   offline_write_blocked: 'Offline — please reconnect to make changes',
   transaction_load_failed: 'Could not read transactions',
-  transaction_saved_pending: 'Saved locally, waiting to sync',
-  transaction_saved_synced: 'Saved',
   transaction_needs_fix: 'Needs a fix before it can sync',
   transaction_gone_on_server: 'Deleted on the server',
   transaction_waiting_network: 'Waiting for a network connection',

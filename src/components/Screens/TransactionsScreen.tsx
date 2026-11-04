@@ -34,6 +34,7 @@ import { getDb } from '../../db/instance';
 import { nextPageOffset } from '../../db/pagination';
 import { listTransactions, TransactionQueryFilters, deleteLocalTransaction } from '../../db/repository';
 import { getCurrentScope } from '../../db/scope';
+import { subscribeSyncChanged } from '../../db/syncState';
 import { startOfCurrentQuarter } from '../../lib/dateRange';
 import { requestSync } from '../../lib/syncScheduler';
 import { useOnlineGuard } from '../../lib/useOnlineGuard';
@@ -336,6 +337,9 @@ export default function TransactionsScreen({ navigation, route }: ScreenType) {
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const generationRef = React.useRef(0);
   const loadingMoreRef = React.useRef(false);
+  const silentReloadRef = React.useRef(false);
+  // 静默刷新沿用已加载条数，避免同步事件把「加载更多」出来的几页缩回第一页。
+  const loadedCountRef = React.useRef(0);
   const [search, setSearch] = useState('');
   const searchInputRef = React.useRef('');
   const [reloadToken, setReloadToken] = useState(0);
@@ -367,13 +371,20 @@ export default function TransactionsScreen({ navigation, route }: ScreenType) {
   useEffect(() => {
     const generation = generationRef.current + 1;
     generationRef.current = generation;
+    // 同步事件触发的重读不清空列表：否则每轮同步（开始/结束各一次广播）都会闪一下白屏。
+    // 只有首屏、筛选变化与下拉刷新才走 loading 态。
+    const silent = silentReloadRef.current;
+    silentReloadRef.current = false;
 
     const load = async () => {
-      setLoading(true);
+      if (!silent) {
+        setLoading(true);
+      }
       try {
         const db = getDb();
         const scopeId = await getCurrentScope(db);
-        const page = await listTransactions(db, scopeId, { ...filters, limit: PAGE_SIZE, offset: 0 });
+        const limit = silent ? Math.max(PAGE_SIZE, loadedCountRef.current) : PAGE_SIZE;
+        const page = await listTransactions(db, scopeId, { ...filters, limit, offset: 0 });
         if (generation !== generationRef.current) {
           return;
         }
@@ -381,7 +392,7 @@ export default function TransactionsScreen({ navigation, route }: ScreenType) {
         setError(false);
         // 本地库没有廉价 COUNT：total 传 Infinity，翻页在短页/空页时结束。
         setNextOffset(nextPageOffset(
-          { offset: 0, limit: PAGE_SIZE, received: page.length },
+          { offset: 0, limit, received: page.length },
           Number.POSITIVE_INFINITY,
         ));
       } catch {
@@ -442,6 +453,19 @@ export default function TransactionsScreen({ navigation, route }: ScreenType) {
   const reload = useCallback(() => {
     setReloadToken((token) => token + 1);
   }, []);
+
+  useEffect(() => {
+    loadedCountRef.current = transactions.length;
+  }, [transactions]);
+
+  const reloadSilently = useCallback(() => {
+    silentReloadRef.current = true;
+    reload();
+  }, [reload]);
+
+  // 列表读的是本地库快照：保存交易与同步完成只会广播 syncState 变更，不经过 React state。
+  // 不订阅就只能靠下拉刷新看到新数据（返回列表、同步成功后列表都不变）。
+  useEffect(() => subscribeSyncChanged(reloadSilently), [reloadSilently]);
 
   // 下拉刷新：先发起后台同步（不阻塞动画），同时重查本地列表。
   const manualRefresh = useCallback(() => {

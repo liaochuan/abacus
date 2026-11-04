@@ -17,7 +17,6 @@ import TransactionSplitForm from '../Forms/TransactionSplitForm';
 import { RootDispatch, RootState } from '../../store';
 import translate from '../../i18n/locale';
 import GroupTitle from './Fields/GroupTitle';
-import { submitFeedback } from './submitFeedback';
 import { getDb } from '../../db/instance';
 import { saveLocalTransaction } from '../../db/repository';
 import { getCurrentScope } from '../../db/scope';
@@ -190,10 +189,8 @@ export default function TransactionForm({
         baseUpdatedAt: isCreate ? null : base ?? null,
       });
 
+      // 保存结果不再弹窗：是否已推到服务端看顶栏的同步状态图标即可。
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch();
-      Alert.alert(translate(submitFeedback(online) === 'saved_pending'
-        ? 'transaction_saved_pending'
-        : 'transaction_saved_synced'));
       if (online) {
         // 保存成功即尝试推送：离线时不触发（requestSync 自己也会跳成 offline，
         // 但这里提前跳过可以避免保存后无意义的单飞锁占用）。

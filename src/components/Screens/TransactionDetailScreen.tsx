@@ -7,6 +7,7 @@ import ErrorWidget from '../UI/ErrorWidget';
 import { getDb } from '../../db/instance';
 import { getTransaction } from '../../db/repository';
 import { getCurrentScope } from '../../db/scope';
+import { subscribeSyncChanged } from '../../db/syncState';
 import { toFormParams, isUsableRecord, TransactionFormParams } from '../../lib/formParams';
 
 export default function TransactionDetailScreen({ navigation, route }: ScreenType) {
@@ -22,6 +23,7 @@ export default function TransactionDetailScreen({ navigation, route }: ScreenTyp
 
   // 本地记录是编辑的唯一数据源；读取完成前不渲染表单，避免用导航参数抢先提交。
   const [formParams, setFormParams] = useState<TransactionFormParams | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -41,10 +43,17 @@ export default function TransactionDetailScreen({ navigation, route }: ScreenTyp
       if (cancelled) {
         return;
       }
-      // 记录不存在时沿用导航参数（基线未知，按 null 处理）。
-      setFormParams(loaded ?? {
-        id, baseUpdatedAt: null, groupTitle, splits,
-      });
+      if (loaded) {
+        setFormParams(loaded);
+        return;
+      }
+      // 首次加载缺记录时沿用导航参数（基线未知，按 null 处理）；
+      // 同步后的重读失败则保留当前表单入参，不拿更旧的导航参数覆盖它。
+      if (reloadToken === 0) {
+        setFormParams({
+          id, baseUpdatedAt: null, groupTitle, splits,
+        });
+      }
     };
 
     load();
@@ -52,7 +61,14 @@ export default function TransactionDetailScreen({ navigation, route }: ScreenTyp
     return () => {
       cancelled = true;
     };
-  }, [id, groupTitle, splits]);
+  }, [id, groupTitle, splits, reloadToken]);
+
+  // 同步会把服务端版本写回本地（可能换 id、刷新 serverUpdatedAt）：
+  // 不重读就会让下次保存拿着过期基线提交，甚至对着已经失效的 id 发 update。
+  // 重读只替换传给表单的 props，表单内部的输入态由 TransactionForm 自己持有，不会被覆盖。
+  useEffect(() => subscribeSyncChanged(() => {
+    setReloadToken((token) => token + 1);
+  }), []);
 
   if (!formParams) {
     return <Loading />;

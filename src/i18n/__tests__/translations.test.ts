@@ -70,19 +70,3 @@ test('全部 15 种语言都存在 offline_no_accounts', () => {
   expect(enUS.offline_no_accounts).toBe('No cached accounts — connect to sync');
   expect(zhCN.offline_no_accounts).toBe('没有缓存的账户，请联网同步');
 });
-
-test('全部 15 种语言都存在交易保存提示文案', () => {
-  expect(Object.keys(translations)).toHaveLength(15);
-  Object.entries(translations).forEach(([locale, module]) => {
-    const keys = ['transaction_saved_pending', 'transaction_saved_synced'] as const;
-    keys.forEach((key) => {
-      expect(typeof module[key]).toBe('string');
-      expect(module[key]).not.toBe('');
-      expect({ [locale]: module[key] }).toHaveProperty(locale);
-    });
-  });
-  expect(enUS.transaction_saved_pending).toBe('Saved locally, waiting to sync');
-  expect(enUS.transaction_saved_synced).toBe('Saved');
-  expect(zhCN.transaction_saved_pending).toBe('已保存到本地，等待同步');
-  expect(zhCN.transaction_saved_synced).toBe('已保存');
-});

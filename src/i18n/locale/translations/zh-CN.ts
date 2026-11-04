@@ -178,8 +178,6 @@ export default {
   offline_no_accounts: '没有缓存的账户，请联网同步',
   offline_write_blocked: '离线 — 请联网后再修改',
   transaction_load_failed: '无法读取交易',
-  transaction_saved_pending: '已保存到本地，等待同步',
-  transaction_saved_synced: '已保存',
   transaction_needs_fix: '需要修正后才能同步',
   transaction_gone_on_server: '已在服务端删除',
   transaction_waiting_network: '等待网络恢复',
