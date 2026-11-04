@@ -29,7 +29,17 @@ import { isStale } from '../db/staleness';
 // 2. 单飞：同一时刻只允许一轮（runExclusively），并发触发直接跳过；
 // 3. 状态里只放固定枚举/短句与计数，绝不放 payload、token 或账户名。
 
-export type SyncReason = 'manual' | 'startup' | 'online' | 'foreground' | 'timer' | 'after-save';
+export type SyncReason = 'manual' | 'startup' | 'online' | 'foreground' | 'timer' | 'after-save' | 'deferred';
+
+// requestSync 的可选行为：
+// - pushOnly：只推 outbox（保存交易后的第一段）；
+// - quiet：后台补跑，不把顶栏切成 syncing，也不上报阶段。
+export type RequestSyncOptions = {
+  pushOnly?: boolean;
+  quiet?: boolean;
+};
+
+type QueuedRequest = { reason: SyncReason; options: RequestSyncOptions };
 
 type Snapshot = {
   lastSyncedAt: string | null;
@@ -49,15 +59,21 @@ const DB_READ_RETRY_INTERVAL_MS = 600_000;
 // 冷启动与下拉刷新不受这个间隔限制。
 export const SYNC_MIN_INTERVAL_MS = 5 * 60_000;
 
+// 保存交易后的重活（pull + blob）延后多久执行：连续保存只跑最后一次，且不阻塞交易上传。
+export const AFTER_SAVE_DEFER_MS = 3_000;
+
 // 账号在同步中途被切换时，本轮作废但新 scope 必须补跑一次；只记一个标记，
 // 当前轮结束后由 requestSync 消费（见末尾）。
-let pendingReason: SyncReason | null = null;
+let pendingRequest: QueuedRequest | null = null;
 
 // 当前正在跑的那一轮属于哪个 scope。用于识别「同步进行中切号」的触发；
-// 同账号的普通重复触发仍丢弃，但 manual 会排队补跑（见 requestSync）。
+// 同账号的普通重复触发仍丢弃，但 manual / deferred / push-only 会排队补跑（见 requestSync）。
 let runningScopeId: string | null = null;
 
-// 只补 blob 的请求在上一轮结束后补跑一次。与 pendingReason 分开记：
+// 保存交易后安排的补跑句柄：每次保存都重置计时，避免每笔交易都跑一轮整同步。
+let deferredHandle: ReturnType<typeof setTimeout> | null = null;
+
+// 只补 blob 的请求在上一轮结束后补跑一次。与 pendingRequest 分开记：
 // 它不跑 push / pull 交易，只是把新维度（区间、币种、账户过滤）对应的缓存拉下来。
 let pendingBlobSync = false;
 
@@ -111,27 +127,42 @@ function errorMessage(error: unknown): string {
  * 请求一轮同步。所有触发点共用这一个入口。
  *
  * - 离线：不建上下文、不发请求，只把状态切到 offline（保留上次成功时间与计数）；
- * - 已有同步在跑：直接返回（不排队）。runExclusively 会复用进行中的 Promise，
- *   但触发点不需要等它，重复排队只会让状态条闪；
+ * - 已有同步在跑：普通重复触发直接返回（不排队）——runExclusively 会复用进行中的 Promise，
+ *   触发点不需要等它，重复排队只会让状态条闪；manual / deferred / startup / push-only
+ *   例外，它们会记下补跑请求（否则保存的这笔交易会被单飞锁静默吞掉）；
  * - 未登录 / 尚未选定账号：回到 idle，不报错；
  * - 失败：network → offline（下轮再试），其余 → error（固定短句）。
+ *
+ * options.pushOnly 只推 outbox，不 pull、不刷 blob、不推进 last_synced_at；
+ * 该轮正常结束后由 scheduleDeferredFullSync 安排一次延后的整轮补跑。
+ * options.quiet 用于后台补跑：不写 syncing 状态，也不上报阶段。
  */
-export async function requestSync(reason: SyncReason): Promise<void> {
+export async function requestSync(
+  reason: SyncReason,
+  options: RequestSyncOptions = {},
+): Promise<void> {
   if (!isOnline()) {
     setSyncState({ kind: 'offline', ...(await readSnapshotForState()) });
     return;
   }
   if (isSyncRunning()) {
-    // 同账号的普通重复触发直接丢弃；但切号和用户主动刷新不能被单飞锁吞掉。
+    // 同账号的普通重复触发直接丢弃；但切号、主动刷新、deferred 与 push-only
+    // 不能被单飞锁吞掉。
     try {
       const db = getDb();
       const currentScope = await getCurrentScope(db);
       if (runningScopeId !== null && currentScope && currentScope !== runningScopeId) {
         // 切号：固定用 startup，保证新 scope 的首轮仍能做 365 天回填。
-        queueFollowUp('startup');
-      } else if (reason === 'manual') {
-        // 区间/币种变化与下拉刷新：当前轮用的是旧区间，结束后必须补跑一次。
-        queueFollowUp('manual');
+        queueFollowUp({ reason: 'startup', options: {} });
+      } else if (
+        reason === 'manual'
+        || reason === 'deferred'
+        || reason === 'startup'
+        || options.pushOnly === true
+      ) {
+        // 区间/币种变化、下拉刷新、deferred 整轮与 push-only 都必须记下补跑请求：
+        // 单飞锁被 requestSync 或 requestBlobSync 持有时，保存的这笔交易不能被静默丢弃。
+        queueFollowUp({ reason, options });
       }
     } catch {
       // 读不到当前 scope：保持原有「丢弃重复触发」语义。
@@ -142,6 +173,7 @@ export async function requestSync(reason: SyncReason): Promise<void> {
   await runExclusively(async () => {
     let db: Db;
     let scopeId = '';
+    let roundFailed = false;
 
     try {
       db = getDb();
@@ -151,9 +183,10 @@ export async function requestSync(reason: SyncReason): Promise<void> {
       return;
     }
 
-    // phase 只用于状态条文案：runSync 是一整轮黑盒，不能观测阶段切换，
-    // 这里给「先 push 后 pull」的第一阶段，视觉上表示「正在同步」。
-    setSyncState({ kind: 'syncing', phase: 'push' });
+    // push 是任何一轮的第一阶段；quiet 的后台补跑不改变状态条。
+    if (options.quiet !== true) {
+      setSyncState({ kind: 'syncing', phase: 'push' });
+    }
 
     try {
       // current_scope 只在这里读一次，后续 buildSyncContext / runSync 都用同一个值；
@@ -174,7 +207,7 @@ export async function requestSync(reason: SyncReason): Promise<void> {
         // 本轮上下文仍属于旧账号：直接结束，不写入任何 outbox/交易，
         // 状态条按新 scope 的真实计数回到 idle。
         // 新账号的请求在切号时会被单飞锁挡掉，这里补一个标记，本轮结束后替新 scope 补跑。
-        pendingReason = 'startup';
+        queueFollowUp({ reason: 'startup', options: {} });
         setSyncState({ kind: 'idle', ...(await readSnapshotSafe(db, currentScope)) });
         return;
       }
@@ -185,17 +218,23 @@ export async function requestSync(reason: SyncReason): Promise<void> {
       // 单飞锁只保留其中一个，只看 reason 会让首轮回填随机丢失。
       await runSync(db, scopeId, ctx, {
         full: before.lastSyncedAt === null && (reason === 'startup' || reason === 'manual'),
+        pushOnly: options.pushOnly === true,
+        // quiet 补跑不改变状态条；其余轮次把阶段变化透出来（push → pull → blobs）。
+        onPhase: options.quiet === true
+          ? undefined
+          : (phase) => setSyncState({ kind: 'syncing', phase }),
       });
 
       // 同步期间账号被切换：本轮数据属于旧 scope（已落库），但新 scope 还一次都没同步。
       // 它的请求在切号时已被单飞锁挡掉，这里补标记，本轮结束后替新 scope 再跑一次。
       const scopeAfterRun = await getCurrentScope(db);
       if (scopeAfterRun !== scopeId) {
-        pendingReason = 'startup';
+        queueFollowUp({ reason: 'startup', options: {} });
       }
 
       setSyncState({ kind: 'idle', ...(await readSnapshotSafe(db, scopeId)) });
     } catch (error) {
+      roundFailed = true;
       // 失败前如果账号已被切走，同样要替新 scope 补跑一次。
       await noteScopeChange(db, scopeId);
       const snapshot = await readSnapshotSafe(db, scopeId);
@@ -214,6 +253,15 @@ export async function requestSync(reason: SyncReason): Promise<void> {
       }
     } finally {
       emitSyncChanged();
+      // push-only 轮要确认 outbox 真的清空才安排补跑：pushPending 会把 network / server
+      // 失败吞成「保持 pending」，本轮不会抛错。仍有 pending 时交给 ensureTimerIfPending
+      // 的 60 秒退避，否则 3 秒后立刻重试会绕过退避并快速耗尽 attempts。
+      if (options.pushOnly === true) {
+        const after = await readSnapshotSafe(db, scopeId);
+        if (!roundFailed && after.pending === 0) {
+          scheduleDeferredFullSync();
+        }
+      }
       // 空闲时定时器会自行停止；同步结束后仍有 outbox 积压时必须重新拉起 60 秒重试，
       // 否则一次失败的推送会一直躺在 pending 里等到下一次人工触发。
       await ensureTimerIfPending();
@@ -222,17 +270,33 @@ export async function requestSync(reason: SyncReason): Promise<void> {
 
   runningScopeId = null;
 
-  if (pendingReason !== null) {
-    const nextReason = pendingReason;
-    pendingReason = null;
-    // 不 await：补跑仍走单飞锁，触发点本身不需要等它。
-    requestSync(nextReason).catch(() => {});
-  }
+  drainPendingRequests();
 
   if (pendingBlobSync) {
     pendingBlobSync = false;
     requestBlobSync().catch(() => {});
   }
+}
+
+/**
+ * 保存交易后的同步入口：先只推送 outbox（一笔 POST 或 PUT），
+ * 让服务端尽快拿到这笔交易；pull 与 blob 刷新由 scheduleDeferredFullSync 延后补跑。
+ * 保存时正好有同步在跑：本轮结束后先补一次 push-only，再由它安排整轮补跑。
+ */
+export async function requestAfterSave(): Promise<void> {
+  await requestSync('after-save', { pushOnly: true });
+}
+
+// 消费上一轮结束时排下的补跑请求。requestSync 与 requestBlobSync 共用同一把单飞锁，
+// 两边收尾都要 drain，否则锁被 blob 轮持有时保存的 push-only 会一直搁置。
+function drainPendingRequests(): void {
+  if (pendingRequest === null) {
+    return;
+  }
+  const next = pendingRequest;
+  pendingRequest = null;
+  // 不 await：补跑仍走单飞锁，触发点本身不需要等它。
+  requestSync(next.reason, next.options).catch(() => {});
 }
 
 /**
@@ -304,6 +368,10 @@ export async function requestBlobSync(): Promise<void> {
     return;
   }
 
+  // blob 轮与整轮共用一把单飞锁：锁被它持有时排下的 push-only / manual 也要在这里消费，
+  // 否则保存的这笔交易要等到下一次 startup/manual 才会推送。
+  drainPendingRequests();
+
   if (pendingBlobSync) {
     pendingBlobSync = false;
     requestBlobSync().catch(() => {});
@@ -311,14 +379,51 @@ export async function requestBlobSync(): Promise<void> {
 }
 
 // startup/manual 能承担首次 365 天回填；startup 优先级最高，不能被弱 reason 覆盖。
-function queueFollowUp(reason: SyncReason): void {
-  if (reason === 'startup') {
-    pendingReason = 'startup';
+function queueFollowUp(request: QueuedRequest): void {
+  if (request.reason === 'startup') {
+    pendingRequest = { reason: 'startup', options: {} };
     return;
   }
-  if (pendingReason === null) {
-    pendingReason = reason;
+  if (pendingRequest === null) {
+    pendingRequest = request;
   }
+}
+
+function clearDeferredHandle(): void {
+  if (deferredHandle !== null) {
+    clearTimeout(deferredHandle);
+    deferredHandle = null;
+  }
+}
+
+// 保存交易后延后跑一整轮（pull + blobs）。连续保存只保留最后一次：每次调用都重置计时，
+// 避免每保存一笔就跑一轮整同步。补跑用 quiet，不重新把顶栏切成 syncing。
+function scheduleDeferredFullSync(): void {
+  if (!isOnline()) {
+    return;
+  }
+  clearDeferredHandle();
+  deferredHandle = setTimeout(() => {
+    deferredHandle = null;
+    resolveDeferredReason()
+      .then((reason) => requestSync(reason, { quiet: true }))
+      .catch(() => {});
+  }, AFTER_SAVE_DEFER_MS);
+}
+
+// 从来没成功同步过时按 startup 跑，保证首轮仍是 365 天回填；
+// 读不到状态就按 deferred（下一次 startup / manual 仍会兜底）。
+async function resolveDeferredReason(): Promise<SyncReason> {
+  try {
+    const db = getDb();
+    const scopeId = await getCurrentScope(db);
+    if (scopeId && (await getMeta(db, scopeId, META_LAST_SYNCED_AT)) === null) {
+      return 'startup';
+    }
+  } catch {
+    // 忽略：按 deferred 处理。
+  }
+  return 'deferred';
 }
 
 async function ensureTimerIfPending(): Promise<void> {
@@ -342,7 +447,7 @@ async function noteScopeChange(db: Db, scopeId: string): Promise<void> {
   try {
     const currentScope = await getCurrentScope(db);
     if (currentScope && currentScope !== scopeId) {
-      pendingReason = 'startup';
+      queueFollowUp({ reason: 'startup', options: {} });
     }
   } catch {
     // 读不到时不影响本轮收尾。
@@ -412,6 +517,8 @@ export function stopSyncTimer(): void {
   timerGeneration += 1;
   timerAllowed = false;
   clearTimerHandle();
+  // 保存后安排的补跑也一并取消：组件卸载 / 重置本地数据后不应再发整轮请求。
+  clearDeferredHandle();
 }
 
 // 只允许「已启动」的定时器被重启。每次都重新 startSyncTimer 会递增 generation，

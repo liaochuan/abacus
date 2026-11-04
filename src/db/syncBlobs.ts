@@ -20,7 +20,8 @@ import type { Db } from './types';
 //
 // 键与形状对齐 spec §7.3（docs/superpowers/specs/2026-10-26-offline-sync-design.md）：
 // - 同一份数据在不同区间 / 币种 / 过滤开关下是不同的快照，键必须带全维度；
-// - 低频数据（bills / piggy_banks / currencies）只在缺失或超过 1 小时时刷新。
+// - 低频数据（bills / piggy_banks / currencies）只在缺失或超过 1 小时时刷新；
+// - autocomplete 只在缺失或超过 30 分钟时刷新（新增一笔交易不影响候选集）。
 
 // 完整 SyncContext（src/db/sync.ts）是本类型的超集：runSync 组装出的上下文可直接结构化赋值。
 // selectedBrandStyle 不属于同步上下文，缺省时用默认品牌色（图表颜色只是展示细节）。
@@ -61,8 +62,8 @@ export type BlobPlanItem = {
 
 export type BlobPlanOptions = {
   /**
-   * 已判定需要刷新的低频键集合（`bills` / `piggy_banks` / `currencies`）。
-   * 省略 = 空集合 = 不刷新任何低频键；只有显式传入的集合才纳入计划。
+   * 已判定需要刷新的键集合（`bills` / `piggy_banks` / `currencies` / `autocomplete:*`）。
+   * 省略 = 空集合 = 不刷新任何到期键；只有显式传入的集合才纳入计划。
    * 这样 planBlobRefresh 保持纯函数，读库的过期判断由 lowFrequencyRefreshSet 完成。
    */
   staleLowFrequency?: Set<string>;
@@ -75,11 +76,42 @@ const AUTOCOMPLETE_LIMIT = 100;
 
 export const LOW_FREQUENCY_TTL_MS = 60 * 60 * 1000;
 
+// autocomplete 的候选集只随账户/分类/预算/账单/标签本身变化，新增一笔交易影响不到它。
+// 30 分钟刷新一次即可，避免每次保存都重复拉 5 个键。
+export const AUTOCOMPLETE_TTL_MS = 30 * 60 * 1000;
+
 // 与 spec §7.3 的淘汰策略一致：当前区间 + 最近 3 个区间组合。
 const KEEP_RANGE_COMBINATIONS = 3;
 
-// Firefly 的聚合端点并发上限（按计划项计；单条计划项内部的请求串行，总并发不会超过该值）。
+// Firefly 的聚合端点并发上限（按计划项计）。
 const FETCH_CONCURRENCY = 4;
+
+// 请求级的全局上限：计划项之间最多 4 个同时处理，categories 项内部还会再并发 4 个请求，
+// 合计最多 8 个 HTTP 在飞。用信号量统一约束，避免把小规模自建 Firefly 打满。
+export const MAX_IN_FLIGHT_REQUESTS = FETCH_CONCURRENCY * 2;
+
+let activeRequests = 0;
+const requestWaiters: Array<() => void> = [];
+
+// 取得一个请求名额：满额时挂起，由释放方直接把名额转交（activeRequests 保持不变）。
+async function acquireRequestSlot(): Promise<void> {
+  if (activeRequests < MAX_IN_FLIGHT_REQUESTS) {
+    activeRequests += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    requestWaiters.push(resolve);
+  });
+}
+
+function releaseRequestSlot(): void {
+  const next = requestWaiters.shift();
+  if (next !== undefined) {
+    next();
+    return;
+  }
+  activeRequests -= 1;
+}
 
 const rangeQuery = (range: { start: string; end: string }): string => `start=${range.start}&end=${range.end}`;
 
@@ -144,7 +176,9 @@ const piggyBanksUrl = (ctx: BlobSyncContext): string => `${ctx.backendURL}/api/v
 
 const currenciesUrl = (ctx: BlobSyncContext): string => `${ctx.backendURL}/api/v1/currencies`;
 
-// 纯函数：当前区间 + 币种 + 过滤开关对应的完整键集合（低频键是否纳入由调用方决定）。
+// 纯函数：当前区间 + 币种 + 过滤开关对应的完整键集合。
+// 低频键（bills / piggy_banks / currencies）与 autocomplete 是否纳入由调用方按各自 TTL 决定
+// （见 lowFrequencyRefreshSet），其余键每轮都刷新。
 // 顺序固定，便于测试与诊断：accounts → categories → budgets → summary → chart:* → autocomplete:* → 低频键。
 export function planBlobRefresh(
   ctx: BlobSyncContext,
@@ -152,10 +186,10 @@ export function planBlobRefresh(
 ): BlobPlanItem[] {
   const { start, end } = ctx.range;
   const code = ctx.currencyCode;
-  // 缺省为空集合：低频键不会因为「调用方忘了传集合」而每轮都请求。
+  // 缺省为空集合：低频键与 autocomplete 不会因为「调用方忘了传集合」而每轮都请求。
   // 首轮同步与过期刷新都由 lowFrequencyRefreshSet 显式算出集合，再由 pullBlobs 传入。
   const gated = options.staleLowFrequency ?? new Set<string>();
-  const includeLowFrequency = (key: string): boolean => gated.has(key);
+  const includeDue = (key: string): boolean => gated.has(key);
 
   const plan: BlobPlanItem[] = [
     {
@@ -192,21 +226,25 @@ export function planBlobRefresh(
   ];
 
   AUTOCOMPLETE_KINDS.forEach((kind) => {
+    const key = blobKeys.autocomplete(kind);
+    if (!includeDue(key)) {
+      return;
+    }
     plan.push({
-      key: blobKeys.autocomplete(kind),
+      key,
       url: autocompleteUrl(ctx, kind),
       kind: 'autocomplete',
       autocompleteKind: kind,
     });
   });
 
-  if (includeLowFrequency(blobKeys.bills())) {
+  if (includeDue(blobKeys.bills())) {
     plan.push({ key: blobKeys.bills(), url: billsUrl(ctx), kind: 'bills' });
   }
-  if (includeLowFrequency(blobKeys.piggyBanks())) {
+  if (includeDue(blobKeys.piggyBanks())) {
     plan.push({ key: blobKeys.piggyBanks(), url: piggyBanksUrl(ctx), kind: 'piggyBanks' });
   }
-  if (includeLowFrequency(blobKeys.currencies())) {
+  if (includeDue(blobKeys.currencies())) {
     plan.push({ key: blobKeys.currencies(), url: currenciesUrl(ctx), kind: 'currencies' });
   }
 
@@ -742,25 +780,34 @@ export function buildAutocompleteOptions(body: unknown): AutocompleteOption[] {
 // ---------------------------------------------------------------------------
 // 运行器
 
-// 返回需要刷新的低频键：缺失、读取失败或 fetchedAt 超过 1 小时。读取失败按「需要刷新」
-// 处理，让下一轮网络请求有机会修复损坏行。
+// 返回需要刷新的键：低频键（bills / piggy_banks / currencies）与 autocomplete 各自按 TTL
+// 判断。缺失、读取失败或超过 TTL 都算到期（读取失败按「需要刷新」处理，
+// 让下一轮网络请求有机会修复损坏行）。
 export async function lowFrequencyRefreshSet(
   db: Db,
   scopeId: string,
   now: Date = new Date(),
   ttlMs: number = LOW_FREQUENCY_TTL_MS,
 ): Promise<Set<string>> {
-  const keys = [blobKeys.bills(), blobKeys.piggyBanks(), blobKeys.currencies()];
+  const entries: Array<{ key: string; ttlMs: number }> = [
+    { key: blobKeys.bills(), ttlMs },
+    { key: blobKeys.piggyBanks(), ttlMs },
+    { key: blobKeys.currencies(), ttlMs },
+    ...AUTOCOMPLETE_KINDS.map((kind) => ({
+      key: blobKeys.autocomplete(kind),
+      ttlMs: AUTOCOMPLETE_TTL_MS,
+    })),
+  ];
   const due = new Set<string>();
 
-  await Promise.all(keys.map(async (key) => {
+  await Promise.all(entries.map(async (entry) => {
     try {
-      const blob = await readBlob<unknown>(db, scopeId, key);
-      if (blob === null || isStale(blob.fetchedAt, now, ttlMs)) {
-        due.add(key);
+      const blob = await readBlob<unknown>(db, scopeId, entry.key);
+      if (blob === null || isStale(blob.fetchedAt, now, entry.ttlMs)) {
+        due.add(entry.key);
       }
     } catch {
-      due.add(key);
+      due.add(entry.key);
     }
   }));
 
@@ -768,9 +815,14 @@ export async function lowFrequencyRefreshSet(
 }
 
 const getBody = async (ctx: BlobSyncContext, url: string): Promise<unknown> => {
-  const response = await ctx.http.get(url);
-  // 所有响应统一归一化为 camelCase：blob 的消费方只认本地模型命名。
-  return convertKeysToCamelCase(response?.data);
+  await acquireRequestSlot();
+  try {
+    const response = await ctx.http.get(url);
+    // 所有响应统一归一化为 camelCase：blob 的消费方只认本地模型命名。
+    return convertKeysToCamelCase(response?.data);
+  } finally {
+    releaseRequestSlot();
+  }
 };
 
 // 本地交易里带 billId 的 split 金额：bills 缓存的 currentPaidAmount 由此拼出。
@@ -830,10 +882,13 @@ async function buildPayload(
       return buildAccountsBlob(arrayOf(accounts) as AccountLike[], dataOf(preference));
     }
     case 'categories': {
-      const expense = await getBody(ctx, insightUrl(ctx, 'expense/category'));
-      const noCategoryExpense = await getBody(ctx, insightUrl(ctx, 'expense/no-category'));
-      const income = await getBody(ctx, insightUrl(ctx, 'income/category'));
-      const noCategoryIncome = await getBody(ctx, insightUrl(ctx, 'income/no-category'));
+      // 4 个 insight 端点互不依赖，并发发出：串行时任一次慢聚合都会把整轮拖住。
+      const [expense, noCategoryExpense, income, noCategoryIncome] = await Promise.all([
+        getBody(ctx, insightUrl(ctx, 'expense/category')),
+        getBody(ctx, insightUrl(ctx, 'expense/no-category')),
+        getBody(ctx, insightUrl(ctx, 'income/category')),
+        getBody(ctx, insightUrl(ctx, 'income/no-category')),
+      ]);
       return buildCategoriesBlob(
         arrayOf(expense) as InsightCategoryInput[],
         arrayOf(noCategoryExpense) as InsightCategoryInput[],
@@ -910,7 +965,8 @@ async function buildPayload(
   }
 }
 
-// 固定并发：每个计划项内部串行请求，因此 HTTP 并发不会超过 limit。
+// 固定并发：最多 limit 个计划项同时处理；单条计划项内部的请求并发由 getBody 的
+// 全局信号量统一约束（MAX_IN_FLIGHT_REQUESTS），因此请求级上限可预期。
 async function runBounded<T>(
   items: T[],
   limit: number,

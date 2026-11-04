@@ -364,7 +364,7 @@ export async function saveLocalTransaction(
   });
 
   // 本地保存改变了 pending 计数：无论在线与否都要广播，状态条才能立刻更新。
-  // 同步请求本身由调用方决定（TransactionForm 仅在线时 requestSync('after-save')）。
+  // 同步请求本身由调用方决定（TransactionForm 仅在线时 requestAfterSave()）。
   emitSyncChanged();
 
   return { id: intent.id, op: intent.op };

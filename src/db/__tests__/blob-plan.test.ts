@@ -1,4 +1,5 @@
 import {
+  AUTOCOMPLETE_TTL_MS,
   buildAccountsBlob,
   buildBalanceChartUrl,
   buildBillsBlob,
@@ -6,6 +7,7 @@ import {
   buildCategoriesBlob,
   buildChartAccountsBlob,
   extractSummary,
+  lowFrequencyRefreshSet,
   planBlobRefresh,
   pullBlobs,
 } from '../syncBlobs';
@@ -38,9 +40,17 @@ const keysOf = (ctx: BlobSyncContext, options?: Parameters<typeof planBlobRefres
 // ---------------------------------------------------------------------------
 // planBlobRefresh：键覆盖与低频门控
 
+const ALL_AUTOCOMPLETE_KEYS = [
+  'autocomplete:accounts',
+  'autocomplete:categories',
+  'autocomplete:budgets',
+  'autocomplete:bills',
+  'autocomplete:tags',
+];
+
 test('刷新计划覆盖当前区间与全部维度', () => {
   const plan = planBlobRefresh(ctxWith(), {
-    staleLowFrequency: new Set(['bills', 'piggy_banks', 'currencies']),
+    staleLowFrequency: new Set(['bills', 'piggy_banks', 'currencies', ...ALL_AUTOCOMPLETE_KEYS]),
   });
   const keys = plan.map((p) => p.key);
   expect(keys).toContain('accounts:2026-07-01:2026-09-30:CNY:all');
@@ -67,34 +77,45 @@ test('displayAllAccounts=false 时 accounts/chart 键为该区间+币种的 asse
   expect(keys).not.toContain('accounts:2026-07-01:2026-09-30:CNY:all');
 });
 
-test('低频键只在缺失或超过 1 小时时纳入计划', () => {
-  // 不传选项 = 空集合：低频键默认不刷新（避免调用方漏传时每轮都请求）。
+test('低频键与 autocomplete 只在到期时纳入计划', () => {
+  // 不传选项 = 空集合：低频键与 autocomplete 默认都不刷新（避免调用方漏传时每轮都请求）。
   const defaults = keysOf(ctxWith());
   expect(defaults).not.toContain('bills');
   expect(defaults).not.toContain('piggy_banks');
   expect(defaults).not.toContain('currencies');
-  expect(defaults).toHaveLength(11);
+  expect(defaults).not.toContain('autocomplete:accounts');
+  expect(defaults).not.toContain('autocomplete:tags');
+  expect(defaults).toHaveLength(6);
 
-  // 传入集合 = 只刷新集合里的低频键；空集合同样表示都还新鲜。
+  // 传入空集合同样表示都还新鲜。
   const fresh = keysOf(ctxWith(), { staleLowFrequency: new Set<string>() });
   expect(fresh).not.toContain('bills');
-  expect(fresh).not.toContain('piggy_banks');
-  expect(fresh).not.toContain('currencies');
+  expect(fresh).not.toContain('autocomplete:tags');
+  expect(fresh).toHaveLength(6);
 
   const all = keysOf(ctxWith(), {
-    staleLowFrequency: new Set(['bills', 'piggy_banks', 'currencies']),
+    staleLowFrequency: new Set(['bills', 'piggy_banks', 'currencies', ...ALL_AUTOCOMPLETE_KEYS]),
   });
   expect(all).toEqual(expect.arrayContaining(['bills', 'piggy_banks', 'currencies']));
+  expect(all).toEqual(expect.arrayContaining(ALL_AUTOCOMPLETE_KEYS));
   expect(all).toHaveLength(14);
 
   const billsOnly = keysOf(ctxWith(), { staleLowFrequency: new Set(['bills']) });
   expect(billsOnly).toContain('bills');
   expect(billsOnly).not.toContain('piggy_banks');
   expect(billsOnly).not.toContain('currencies');
+  expect(billsOnly).not.toContain('autocomplete:accounts');
+
+  // autocomplete 与低频键共用同一个「到期集合」，但可以单独到期。
+  const tagsOnly = keysOf(ctxWith(), { staleLowFrequency: new Set(['autocomplete:tags']) });
+  expect(tagsOnly).toContain('autocomplete:tags');
+  expect(tagsOnly).not.toContain('autocomplete:accounts');
+  expect(tagsOnly).not.toContain('bills');
+  expect(tagsOnly).toHaveLength(7);
 });
 
 test('计划中的 URL 指向对应 Firefly 端点，chart balance 按版本分支', () => {
-  const allLowFrequency = new Set(['bills', 'piggy_banks', 'currencies']);
+  const allLowFrequency = new Set(['bills', 'piggy_banks', 'currencies', ...ALL_AUTOCOMPLETE_KEYS]);
   const plan = planBlobRefresh(ctxWith({ apiVersion: '6.3.0' }), { staleLowFrequency: allLowFrequency });
   const urlOf = (kind: string) => plan.find((item) => item.kind === kind)?.url;
 
@@ -660,7 +681,7 @@ const payloadOf = <T>(blobs: Map<string, BlobRow>, key: string): T => {
   return JSON.parse(row.payload) as T;
 };
 
-test('pullBlobs 并发不超过 4，写入全部规范形状并修剪旧区间', async () => {
+test('pullBlobs 并发不超过 8，写入全部规范形状并修剪旧区间', async () => {
   const initial = {
     'summary:2024-01-01:2024-03-31:CNY': { old: 1 },
     'summary:2024-04-01:2024-06-30:CNY': { old: 1 },
@@ -676,7 +697,7 @@ test('pullBlobs 并发不超过 4，写入全部规范形状并修剪旧区间',
   const written = await pullBlobs(db, 'scope1', ctxWith({ http: fake.http as never }));
 
   expect(written).toBe(14);
-  expect(fake.maxInFlight()).toBeLessThanOrEqual(4);
+  expect(fake.maxInFlight()).toBeLessThanOrEqual(8);
 
   // accounts：snake_case 归一化 + display 合并 + 过滤 inactive。
   const accounts = payloadOf<Array<{ id: string; display: boolean; attributes: { currentBalance: string } }>>(
@@ -781,4 +802,91 @@ test('pullBlobs 本轮零写入时不修剪旧缓存', async () => {
   expect(blobs.has('scope1|summary:2024-01-01:2024-03-31:CNY')).toBe(true);
   expect(blobs.has('scope1|summary:2025-01-01:2025-03-31:CNY')).toBe(true);
   expect(statements.some((sql) => /^DELETE FROM blobs/i.test(sql))).toBe(false);
+});
+
+test('autocomplete 按 30 分钟 TTL 刷新，与低频键的 1 小时互不影响', async () => {
+  const { db } = createFakeDb({
+    'autocomplete:accounts': [],
+    'autocomplete:categories': [],
+    'autocomplete:budgets': [],
+    'autocomplete:bills': [],
+    'autocomplete:tags': [],
+    bills: [],
+    piggy_banks: [],
+    currencies: { currentCode: 'CNY', currencies: [] },
+  });
+
+  // 种子 fetchedAt 为 2026-10-27T00:00:00Z：45 分钟后 autocomplete 过期、低频键仍新鲜。
+  const due = await lowFrequencyRefreshSet(db, 'scope1', new Date('2026-10-27T00:45:00.000Z'));
+  expect([...due].sort()).toEqual([
+    'autocomplete:accounts',
+    'autocomplete:bills',
+    'autocomplete:budgets',
+    'autocomplete:categories',
+    'autocomplete:tags',
+  ]);
+  expect(AUTOCOMPLETE_TTL_MS).toBe(30 * 60 * 1000);
+
+  // 10 分钟时都还新鲜。
+  const fresh = await lowFrequencyRefreshSet(db, 'scope1', new Date('2026-10-27T00:10:00.000Z'));
+  expect(fresh.size).toBe(0);
+
+  // 61 分钟后低频键也进入集合。
+  const staleLow = await lowFrequencyRefreshSet(db, 'scope1', new Date('2026-10-27T01:01:00.000Z'));
+  expect(staleLow.has('bills')).toBe(true);
+  expect(staleLow.has('autocomplete:tags')).toBe(true);
+});
+
+test('categories 的 4 个 insight 请求并发发出', async () => {
+  const insightStarted = new Set<string>();
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const http = {
+    get: async (url: string) => {
+      if (url.includes('/insight/')) {
+        insightStarted.add(url);
+        if (insightStarted.size === 4) {
+          release();
+        }
+      }
+      await gate;
+      return { data: [] };
+    },
+  };
+  const { db } = createFakeDb();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('insight requests are not concurrent')), 2_000);
+  });
+
+  try {
+    await expect(Promise.race([
+      pullBlobs(db, 'scope1', ctxWith({ http: http as never })),
+      timeout,
+    ])).resolves.toBeGreaterThanOrEqual(0);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+  expect(insightStarted.size).toBe(4);
+});
+
+test('autocomplete 新鲜时 pullBlobs 不再请求这 5 个键', async () => {
+  const { db, blobs } = createFakeDb();
+  // 低频键与 autocomplete 都写成新鲜快照（fetchedAt = 现在）。
+  const fresh = new Date().toISOString();
+  ['bills', 'piggy_banks', 'currencies'].forEach((key) => {
+    blobs.set(`scope1|${key}`, { payload: '[]', fetchedAt: fresh });
+  });
+  ['accounts', 'categories', 'budgets', 'bills', 'tags'].forEach((kind) => {
+    blobs.set(`scope1|autocomplete:${kind}`, { payload: '[]', fetchedAt: fresh });
+  });
+  const fake = createFakeHttp(RESPONSES);
+
+  const written = await pullBlobs(db, 'scope1', ctxWith({ http: fake.http as never }));
+
+  // 只写 6 个核心键：autocomplete 与低频键都还在 TTL 内。
+  expect(written).toBe(6);
+  expect(fake.calls.some((url) => /autocomplete\//.test(url))).toBe(false);
 });

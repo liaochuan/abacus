@@ -21,7 +21,7 @@ import { getDb } from '../../db/instance';
 import { saveLocalTransaction } from '../../db/repository';
 import { getCurrentScope } from '../../db/scope';
 import { isOnline } from '../../lib/network';
-import { requestSync } from '../../lib/syncScheduler';
+import { requestAfterSave } from '../../lib/syncScheduler';
 
 import Loading from '../UI/Loading';
 import { initialSplit, TransactionType } from '../../models/transactions';
@@ -192,9 +192,10 @@ export default function TransactionForm({
       // 保存结果不再弹窗：是否已推到服务端看顶栏的同步状态图标即可。
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch();
       if (online) {
-        // 保存成功即尝试推送：离线时不触发（requestSync 自己也会跳成 offline，
+        // 保存成功即尝试推送：离线时不触发（requestAfterSave 自己也会跳成 offline，
         // 但这里提前跳过可以避免保存后无意义的单飞锁占用）。
-        requestSync('after-save').catch(() => {});
+        // 先推 outbox 里待发的交易；pull 与图表刷新由调度层延后合并补跑，不阻塞上传。
+        requestAfterSave().catch(() => {});
       }
       if (shouldClose) {
         navigation.goBack();

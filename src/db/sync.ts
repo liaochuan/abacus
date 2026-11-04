@@ -13,6 +13,7 @@ import { pullBlobs } from './syncBlobs';
 import { classifySyncError } from './syncErrors';
 import { pullTransactions } from './syncPull';
 import { LocalWriteError, pushCreate, pushUpdate } from './syncPush';
+import type { SyncPhase } from './syncState';
 
 // 同步编排：一次 runSync = 推送待发 outbox → 拉取交易 → 拉取 blob → 推进 last_synced_at。
 // 顺序固定（spec §7.6「先 push，后 pull」），因为推送会绑定服务端 id，
@@ -54,6 +55,18 @@ export type SyncResult = {
   conflicts: number;
   /** 本轮因不可重试错误或重试次数耗尽而转入 failed 的 outbox 项数。 */
   failed: number;
+};
+
+export type SyncOptions = {
+  /** 拉取窗口：true = 365 天回填，缺省 90 天增量。 */
+  full?: boolean;
+  /**
+   * 只推送 outbox：保存交易后的第一段。不 pull 交易、不刷新 blob、不推进 last_synced_at，
+   * 让用户提交的内容尽快落到服务端；重活由调度层延后补跑。
+   */
+  pushOnly?: boolean;
+  /** 阶段切换回调，仅用于状态展示，不得携带 payload、token 或账户信息。 */
+  onPhase?: (phase: SyncPhase) => void;
 };
 
 // 认证彻底失效：refresh 之后仍然 401/403，或 refresh 本身被服务端拒绝。
@@ -261,24 +274,34 @@ async function recordSyncFailure(db: Db, scopeId: string, error: unknown): Promi
 
 // 一轮同步的实际流水线。被 withAuthRetry 包裹，因此 token 过期后会整轮重跑：
 // 已经推送成功的 outbox 行已被删除，重跑是幂等的 no-op。
+//
+// opts.pushOnly：保存交易后的第一段只推 outbox。pull 与 blob 刷新由调度层延后补跑，
+// 因此这一轮不推进 last_synced_at，也不碰连接告警——它只证明「这笔交易到服务端了」。
+// opts.onPhase：阶段切换回调，仅用于状态展示（push → pull → blobs）。
 async function runPipeline(
   db: Db,
   scopeId: string,
   ctx: SyncContext,
-  full: boolean,
+  opts: SyncOptions,
 ): Promise<SyncResult> {
   const result: SyncResult = {
     pushed: 0, pulled: 0, deleted: 0, conflicts: 0, failed: 0,
   };
 
+  opts.onPhase?.('push');
   const tally = await pushPending(db, scopeId, ctx);
   result.pushed = tally.pushed;
   result.conflicts = tally.conflicts;
   result.failed = tally.failed;
 
+  if (opts.pushOnly === true) {
+    return result;
+  }
+
   // push 阶段即使有单项失败也算「完成」：仍然拉取，让用户看到服务端的最新状态。
   // 只有 push 抛错（auth / 无法落库）才会走到异常分支，不进入 pull。
-  const pulled = await pullTransactions(db, scopeId, ctx, full);
+  opts.onPhase?.('pull');
+  const pulled = await pullTransactions(db, scopeId, ctx, opts.full === true);
   result.pulled = pulled.pulled;
   result.deleted = pulled.deleted;
 
@@ -292,6 +315,7 @@ async function runPipeline(
 
   // blob 刷新只在交易完整拉取后执行：bills 的 currentPaidAmount 依赖本轮交易数据。
   // 单键失败在 pullBlobs 内部吞掉；只有写库级失败会抛到这里，同样不推进 last_synced_at。
+  opts.onPhase?.('blobs');
   await pullBlobs(db, scopeId, ctx);
 
   // 有 failed 或 conflicts 时告警键保持原样（见 markSynced），只有完全干净的一轮才清空。
@@ -311,11 +335,11 @@ export async function runSync(
   db: Db,
   scopeId: string,
   ctx: SyncContext,
-  opts: { full?: boolean } = {},
+  opts: SyncOptions = {},
 ): Promise<SyncResult> {
-  const full = opts.full === true;
+  const options: SyncOptions = { ...opts, full: opts.full === true };
   try {
-    return await withAuthRetry(ctx, (active) => runPipeline(db, scopeId, active, full));
+    return await withAuthRetry(ctx, (active) => runPipeline(db, scopeId, active, options));
   } catch (error) {
     await recordSyncFailure(db, scopeId, error);
     throw error;

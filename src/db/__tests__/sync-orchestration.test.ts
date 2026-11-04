@@ -298,6 +298,41 @@ describe('runSync 顺序', () => {
     await runSync(db, SCOPE, makeCtx({ http }));
     expect(calls).toEqual([]);
   });
+
+  test('pushOnly 只推 outbox，不 pull、不刷新 blob、不推进同步时间', async () => {
+    const { db, meta } = createFakeDb([{ id: 'ob1' }]);
+    const phases: string[] = [];
+
+    await runSync(db, SCOPE, makeCtx(), {
+      pushOnly: true,
+      onPhase: (phase) => phases.push(phase),
+    });
+
+    expect(phases).toEqual(['push']);
+    expect(pushCreateMock).toHaveBeenCalledTimes(1);
+    expect(pullTransactionsMock).not.toHaveBeenCalled();
+    expect(pullBlobsMock).not.toHaveBeenCalled();
+    expect(meta.get('last_synced_at')).toBeUndefined();
+  });
+
+  test('整轮同步按 push → pull → blobs 上报阶段', async () => {
+    const { db } = createFakeDb();
+    const phases: string[] = [];
+
+    await runSync(db, SCOPE, makeCtx(), { onPhase: (phase) => phases.push(phase) });
+
+    expect(phases).toEqual(['push', 'pull', 'blobs']);
+  });
+
+  test('拉取不完整时不上报 blobs 阶段', async () => {
+    const { db } = createFakeDb();
+    const phases: string[] = [];
+    pullTransactionsMock.mockResolvedValue({ pulled: 1, deleted: 0, complete: false });
+
+    await runSync(db, SCOPE, makeCtx(), { onPhase: (phase) => phases.push(phase) });
+
+    expect(phases).toEqual(['push', 'pull']);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -14,9 +14,12 @@ import type { SyncErrorKind } from './syncErrors';
  * - error 带一条固定的、无内容的短消息（不得包含 token、账户名或备注），
  *   reason 是 message 已分类后的枚举，供 UI 展示可翻译的失败原因。
  */
+// 同步阶段只用于状态条展示：push = 推送 outbox，pull = 重拉交易，blobs = 刷新聚合缓存。
+export type SyncPhase = 'push' | 'pull' | 'blobs';
+
 export type SyncState =
   | { kind: 'idle'; lastSyncedAt: string | null; pending: number; problems: number }
-  | { kind: 'syncing'; phase: 'push' | 'pull' }
+  | { kind: 'syncing'; phase: SyncPhase }
   | { kind: 'offline'; lastSyncedAt: string | null; pending: number; problems: number }
   | {
     kind: 'error';
