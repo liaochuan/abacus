@@ -12,9 +12,7 @@ export default {
   version: '0.25.0',
   orientation: 'portrait',
   updates: {
-    enabled: true,
-    checkAutomatically: 'ON_ERROR_RECOVERY',
-    url: 'https://u.expo.dev/292ed6dc-804c-4444-95f5-fa5d76d9913b',
+    enabled: false,
   },
   ios: {
     icon: './src/images/icon-abacus.png',
@@ -54,8 +52,8 @@ export default {
         backgroundColor: '#121215',
       },
     },
-    playStoreUrl: 'https://play.google.com/store/apps/details?id=abacus.fireflyiii.android.app',
-    package: IS_DEV ? 'abacus.fireflyiii.android.app.dev' : 'abacus.fireflyiii.android.app',
+    playStoreUrl: 'https://play.google.com/store/apps/details?id=abacus.fireflyiii.android.liaocl',
+    package: IS_DEV ? 'abacus.fireflyiii.android.liaocl.dev' : 'abacus.fireflyiii.android.liaocl',
     versionCode: 41,
   },
   scheme: 'abacusfiiiapp',
@@ -63,16 +61,21 @@ export default {
   runtimeVersion: {
     policy: 'sdkVersion',
   },
-  extra: {
-    eas: {
-      projectId: '292ed6dc-804c-4444-95f5-fa5d76d9913b',
-    },
-  },
   plugins: [
     'expo-asset',
     'expo-secure-store',
     'expo-localization',
     './plugins/withAndroidManifest',
+    './plugins/withReleaseSigning',
+    './plugins/withGradleMemory',
+    [
+      'expo-build-properties',
+      {
+        android: {
+          minSdkVersion: 31,
+        },
+      },
+    ],
     [
       'expo-font',
       {

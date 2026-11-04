@@ -64,3 +64,6 @@ service-account.json
 detox_test.sh
 artifacts/
 .DS_Store
+
+# 本机打包配置（含 keystore 路径与密码，禁止提交）
+scripts/android-release.local.json
