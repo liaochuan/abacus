@@ -12,7 +12,15 @@ export type AutocompleteOption = {
   name: string;
   // 同步缓存带实体类型（账户类型过滤需要）；旧缓存可能没有。
   type?: string;
+  // 账户缓存额外带币种，离线选中后才能沿用账户币种而不是全局当前币种。
+  currencyCode?: string;
+  currencySymbol?: string;
 };
+
+// 可选文本字段：空串、非字符串一律视为缺失，避免把脏值写进选项。
+const optionalText = (value: unknown): string | undefined => (
+  typeof value === 'string' && value !== '' ? value : undefined
+);
 
 // 缓存的规范形状是 { id, name }[]；历史数据可能是 string[] 或 { name }[]。
 // 统一归一化：缺 id 补空串，缺 name 的条目视为损坏数据丢弃。
@@ -23,14 +31,27 @@ const toOption = (item: unknown): AutocompleteOption | null => {
   if (item === null || typeof item !== 'object') {
     return null;
   }
-  const { id, name, type } = item as { id?: unknown; name?: unknown; type?: unknown };
+  const {
+    id, name, type, currencyCode, currencySymbol,
+  } = item as {
+    id?: unknown;
+    name?: unknown;
+    type?: unknown;
+    currencyCode?: unknown;
+    currencySymbol?: unknown;
+  };
   if (typeof name !== 'string' || name === '') {
     return null;
   }
+  // 旧缓存没有币种字段：保持原有形状，不补空串。
+  const normalizedCurrencyCode = optionalText(currencyCode);
+  const normalizedCurrencySymbol = optionalText(currencySymbol);
   return {
     id: typeof id === 'string' ? id : '',
     name,
     type: typeof type === 'string' && type !== '' ? type : undefined,
+    ...(normalizedCurrencyCode !== undefined ? { currencyCode: normalizedCurrencyCode } : {}),
+    ...(normalizedCurrencySymbol !== undefined ? { currencySymbol: normalizedCurrencySymbol } : {}),
   };
 };
 

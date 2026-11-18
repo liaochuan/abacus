@@ -162,7 +162,7 @@ export default function TransactionForm({
         foreignAmount: split.foreignAmount ? split.foreignAmount.replace(',', '.') : '',
         // 未选分类时显式写空串，避免把旧分类 id 带进本地 payload。
         categoryId: split.categoryName === '' ? '' : split.categoryId,
-        // 离线缓存的账户选项不带币种，空值用当前账户币种兜底；符号保持为空。
+        // 账户缓存带币种，但旧缓存可能缺失；空值用当前账户币种兜底，符号保持为空。
         currencyCode: split.currencyCode || code,
       }));
       // 当前币种也取不到时宁可中止，也不写入一条没有币种的交易。

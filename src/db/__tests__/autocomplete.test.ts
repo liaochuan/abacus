@@ -140,6 +140,26 @@ test('readAutocomplete 保留同步缓存里的 id 与 type', async () => {
   ]);
 });
 
+test('readAutocomplete 保留账户缓存里的币种代码与符号', async () => {
+  const db = createBlobDb([
+    blobRow('scope1', 'autocomplete:accounts', [
+      {
+        id: '1', name: 'Euro cash', type: 'Asset account', currencyCode: 'EUR', currencySymbol: '€',
+      },
+      {
+        id: '2', name: 'Broken', currencyCode: '', currencySymbol: 42,
+      },
+    ]),
+  ]);
+
+  await expect(readAutocomplete(db, 'scope1', 'accounts')).resolves.toEqual([
+    {
+      id: '1', name: 'Euro cash', type: 'Asset account', currencyCode: 'EUR', currencySymbol: '€',
+    },
+    { id: '2', name: 'Broken' },
+  ]);
+});
+
 test('readAutocomplete 兼容旧缓存 { name }[]，缺失 id 补空串', async () => {
   const db = createBlobDb([
     blobRow('scope1', 'autocomplete:categories', [{ name: 'Groceries' }, { id: '7', name: 'Travel' }]),

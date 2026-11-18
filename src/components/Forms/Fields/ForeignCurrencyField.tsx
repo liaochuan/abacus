@@ -29,9 +29,9 @@ export default function ForeignCurrencyField({
     setDisplayAutocomplete(false);
   }, [onSelect]);
 
-  const handleFocus = () => {
+  const handleFocus = useCallback(() => {
     setDisplayAutocomplete(true);
-  };
+  }, []);
 
   return useMemo(
     () => (
@@ -65,9 +65,12 @@ export default function ForeignCurrencyField({
       </AStack>
     ),
     [
+      currencies,
       value,
       placeholder,
       displayAutocomplete,
+      handleFocus,
+      handleSelectAutocomplete,
     ],
   );
 }

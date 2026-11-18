@@ -1,6 +1,7 @@
 import {
   AUTOCOMPLETE_TTL_MS,
   buildAccountsBlob,
+  buildAutocompleteOptions,
   buildBalanceChartUrl,
   buildBillsBlob,
   buildBudgetsBlob,
@@ -357,6 +358,22 @@ test('accounts 合并 frontpage display、过滤 inactive/initial-balance 并按
   const result = buildAccountsBlob(accounts, { attributes: { data: [1, 4] } });
   expect(result.map((item) => item.id)).toEqual(['4', '1']);
   expect(result.map((item) => item.display)).toEqual([true, true]);
+});
+
+test('autocomplete 候选保留账户币种，空值与非字符串被丢弃', () => {
+  expect(buildAutocompleteOptions([
+    {
+      id: 7, name: 'Euro cash', type: 'Asset account', currencyCode: 'EUR', currencySymbol: '€',
+    },
+    {
+      id: 8, name: 'Broken', currencyCode: '', currencySymbol: 42,
+    },
+  ])).toEqual([
+    {
+      id: '7', name: 'Euro cash', type: 'Asset account', currencyCode: 'EUR', currencySymbol: '€',
+    },
+    { id: '8', name: 'Broken' },
+  ]);
 });
 
 test('chart accounts 赋色、计算极值，并按币种过滤', () => {

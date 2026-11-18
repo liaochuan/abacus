@@ -8,6 +8,9 @@ import TransactionSplitForm from '../TransactionSplitForm';
 
 const mockNetwork = { online: true };
 const mockAutocompleteProps: Array<Record<string, unknown>> = [];
+const mockDispatch = Object.assign(jest.fn(), {
+  transactions: { setTransactionSplitByIndex: jest.fn() },
+});
 
 jest.mock('../../../lib/network', () => ({
   __esModule: true,
@@ -32,7 +35,7 @@ jest.mock('../../../models/transactions', () => ({
 }));
 
 jest.mock('react-redux', () => ({
-  useDispatch: () => jest.fn(),
+  useDispatch: () => mockDispatch,
   useSelector: (selector: (state: unknown) => unknown) => selector({
     configuration: { displayForeignCurrency: false, selectedBrandStyle: '#000000' },
   }),
@@ -90,6 +93,10 @@ const renderForm = async (): Promise<void> => {
   });
 };
 
+beforeEach(() => {
+  mockDispatch.transactions.setTransactionSplitByIndex.mockClear();
+});
+
 test('在线时 7 个自动补全都不走离线缓存', async () => {
   mockNetwork.online = true;
 
@@ -106,4 +113,33 @@ test('离线时 7 个自动补全都切到离线缓存', async () => {
 
   expect(mockAutocompleteProps).toHaveLength(7);
   expect(mockAutocompleteProps.every((props) => props.offline === true)).toBe(true);
+});
+
+test('离线选中带币种的账户时把币种写回拆分', async () => {
+  mockNetwork.online = false;
+  await renderForm();
+
+  const sourceAccount = mockAutocompleteProps.find(
+    (props) => props.label === 'transaction_form_sourceAccount_label',
+  );
+  expect(sourceAccount).toBeDefined();
+
+  await act(async () => {
+    (sourceAccount?.onSelectAutocomplete as (option: Record<string, unknown>) => void)({
+      id: 'acc-1',
+      name: 'Euro cash',
+      currencyCode: 'EUR',
+      currencySymbol: '€',
+    });
+  });
+
+  expect(mockDispatch.transactions.setTransactionSplitByIndex).toHaveBeenCalledWith(
+    0,
+    expect.objectContaining({
+      sourceId: 'acc-1',
+      sourceName: 'Euro cash',
+      currencyCode: 'EUR',
+      currencySymbol: '€',
+    }),
+  );
 });

@@ -258,6 +258,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
   typeof value === 'object' && value !== null && !Array.isArray(value)
 );
 
+// 可选文本字段：空串与非字符串按缺失处理，旧缓存不会补出空币种。
+const optionalText = (value: unknown): string | undefined => (
+  typeof value === 'string' && value !== '' ? value : undefined
+);
+
 // Firefly 多数端点把数组包在 { data: ... } 里，summary/autocomplete 则直接是裸对象或数组。
 const dataOf = (body: unknown): unknown => (
   isRecord(body) && Object.hasOwn(body, 'data') ? body.data : body
@@ -772,7 +777,16 @@ export function buildAutocompleteOptions(body: unknown): AutocompleteOption[] {
     }
     const id = item.id === undefined || item.id === null ? '' : String(item.id);
     const type = typeof item.type === 'string' && item.type !== '' ? item.type : undefined;
-    options.push({ id, name: item.name, type });
+    // 账户候选带币种：离线选中后金额前缀与保存币种才能沿用账户本身。
+    const currencyCode = optionalText(item.currencyCode);
+    const currencySymbol = optionalText(item.currencySymbol);
+    options.push({
+      id,
+      name: item.name,
+      type,
+      ...(currencyCode !== undefined ? { currencyCode } : {}),
+      ...(currencySymbol !== undefined ? { currencySymbol } : {}),
+    });
   });
   return options;
 }

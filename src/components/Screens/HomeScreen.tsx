@@ -27,7 +27,7 @@ import moment from 'moment';
 import { RootDispatch, RootState } from '../../store';
 import translate from '../../i18n/locale';
 import { localNumberFormat, useThemeColors } from '../../lib/common';
-import { cachedCurrentCode } from '../../db/cachedCurrencies';
+import { cachedCurrencies } from '../../db/cachedCurrencies';
 import { blobKeys } from '../../db/keys';
 import { useBlob } from '../../db/useBlob';
 import { isOnline } from '../../lib/network';
@@ -778,12 +778,16 @@ export default function HomeScreen() {
       if (currencies.status === 'fulfilled') {
         return;
       }
-      // 离线（或服务端不可达）时币种列表拉不到，currentCode 会一直是空串，
-      // 新增交易表单随后因没有币种而中止。回落到 currencies blob 里的当前币种，
-      // 只补 currentCode，币种列表等联网后的 getCurrencies 正常回填。
-      const code = await cachedCurrentCode();
-      if (code !== null) {
-        dispatch.currencies.setCurrentCode(code);
+      // 离线（或服务端不可达）时币种接口拉不到，currentCode 会一直是空串，
+      // 新增交易表单随后因没有币种而中止；外币选择器也会没有候选。
+      // 回落到 currencies blob：同时补当前币种与完整列表；恢复网络不会自动重拉，
+      // 要等首页重新挂载或重新登录后 getCurrencies 才会刷新。
+      const cached = await cachedCurrencies();
+      if (cached !== null) {
+        dispatch.currencies.setCurrencies({
+          ...(cached.currencies.length > 0 ? { currencies: cached.currencies } : {}),
+          ...(cached.currentCode !== null ? { currentCode: cached.currentCode } : {}),
+        });
       }
     })();
   }, []);
